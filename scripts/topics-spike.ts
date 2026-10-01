@@ -58,8 +58,8 @@ await step("editMessageText in the tab", async () => {
 await step("HTML formatting in the tab", () =>
   api.sendMessage(chatId, "4/5 <b>bold</b> <code>code</code>", { ...inTab, parse_mode: "HTML" }).then(() => true));
 await step("editForumTopic (rename)", () => api.editForumTopic(chatId, thread, { name: "tg-cc-bot spike ✓" }));
-await step("sendMessage to the main view (no thread)", () =>
-  api.sendMessage(chatId, "5/5 main view message from the spike").then(() => true));
+await step("sendMessage without a thread (note where it shows up)", () =>
+  api.sendMessage(chatId, "5/5 message sent without a thread").then(() => true));
 
 if (process.env.KEEP === "1") {
   console.log("KEEP=1: leaving the tab in place.");

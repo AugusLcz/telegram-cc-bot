@@ -1,6 +1,6 @@
 # tg-cc-bot
 
-**Drive Claude Code on your server from Telegram, signed in with your Claude subscription. Every chat tab is its own Claude Code session.**
+**Drive Claude Code on your server from Telegram, signed in with your Claude subscription. Every new chat with the bot is its own Claude Code session.**
 
 [中文说明](README-zh.md) · [Architecture](docs/ARCHITECTURE.md)
 
@@ -10,7 +10,7 @@ tg-cc-bot is a thin Telegram front end for real, unmodified Claude Code processe
 
 ## Contents
 
-- [The model: tabs are sessions](#the-model-tabs-are-sessions)
+- [The model: chats are sessions](#the-model-chats-are-sessions)
 - [Why this design](#why-this-design)
 - [Features](#features)
 - [Commands](#commands)
@@ -26,90 +26,88 @@ tg-cc-bot is a thin Telegram front end for real, unmodified Claude Code processe
 
 ---
 
-## The model: tabs are sessions
+## The model: chats are sessions
 
-Telegram can split a private chat with a bot into **tabs** (topics, shown at the top of the chat). tg-cc-bot uses them like this:
+With **Threaded Mode** enabled in @BotFather, Telegram splits your conversation with the bot into separate **chats**. Typing on the bot's main screen opens a new chat, and each one appears in the bot's chat list. tg-cc-bot maps them like this:
 
-| Where | What it is | What you do there |
-|---|---|---|
-| **Main view** (outside tabs) | Control panel | Commands only: choose or add the active **project**, open tabs, list sessions, change defaults, check status |
-| **A tab** | One Claude Code session, working in the project that was active when the tab was opened | Talk to Claude, send photos and files, use Claude Code's slash commands and your skills |
+- **Each chat is one Claude Code session.** Its first message to Claude starts the session in the **active project**; later messages continue it. Leave a chat and come back any time: the session picks up where it was.
+- **Bot commands are mechanical.** `/projects`, `/status`, `/settings`, `/model` and the rest never involve Claude, work in any chat, and a chat used only for them doesn't become a session.
+- **Everything else goes to Claude**, including Claude Code's own slash commands and your skills.
 
-Open a tab with `/new` or Telegram's **+** button. Both use the active project. To work in another directory, switch the active project in the main view (`/projects`), then open a tab. Old sessions, including ones started from the terminal on the server, can be reopened in a tab with `/resume`.
+To work in another directory, switch the project first (`/project use api`, in any chat), then start a new chat. If you switch inside a chat that hasn't talked to Claude yet, that chat moves too. Old sessions, including ones started from the terminal on the server, can be reopened in a new chat with `/resume`.
 
 ## Why this design
 
 | Approach | Problem |
 |---|---|
 | **Own agent loop calling the API with a subscription OAuth token** (e.g. OpenClaw) | Weaker harness than Claude Code, and [not permitted](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use): subscription credentials may only be used by Claude Code itself |
-| **Official Telegram channel** (`claude --channels plugin:telegram@…`) | One running session receives messages as events. No tabs, no `/new` or `/resume` from Telegram |
+| **Official Telegram channel** (`claude --channels plugin:telegram@…`) | One running session receives messages as events. No separate chats per session, no `/resume` from Telegram |
 | **Driving the interactive TUI through tmux** | Every command works, but menus and prompts have to be scraped from the screen. Brittle, and output formatting is poor |
 | **Agent SDK (this project)** | Structured event stream, permission callbacks, session APIs (`resume`, `listSessions`, `forkSession`), and Claude Code's own command dispatch |
 
 ## Features
 
-- **Parallel sessions.** Several tabs can work at the same time, each in its own project directory, with its own model, permission mode and effort.
+- **Parallel sessions.** Several chats can work at the same time, each in its own project directory, with its own model, permission mode and effort.
 - **Streaming replies.** Live preview via Telegram's `sendMessageDraft`, falling back to editing a placeholder message if drafts aren't available. Final replies are Markdown converted to Telegram HTML: code blocks, tables, lists, quotes and links. Long replies are split safely (code fences stay balanced); very long ones arrive as a `.md` file.
 - **Compact tool activity.** Tool calls collapse into a status message such as `💻 Bash ls -la` or `✏️ Edit src/app.ts`, with subagent calls indented. `/verbose` also shows tool output and timings.
-- **Interactive prompts as buttons.** Permission requests (Allow / Always allow / Deny), `AskUserQuestion` (single- and multi-select), and plan approval, in the tab that asked. While a prompt is open, replying with text denies the request and tells Claude what to do instead, or answers the question in your own words.
-- **Claude Code's full command set.** Built-ins, bundled skills, your personal and project skills, plugin commands and `.claude/commands` work inside tabs and appear in the Telegram command menu.
-- **Tab titles.** A tab opened without a name is titled after its first prompt; your own names are never overwritten. `/rename` renames both the tab and the session.
+- **Interactive prompts as buttons.** Permission requests (Allow / Always allow / Deny), `AskUserQuestion` (single- and multi-select), and plan approval, in the chat that asked. While a prompt is open, replying with text denies the request and tells Claude what to do instead, or answers the question in your own words.
+- **Claude Code's full command set.** Built-ins, bundled skills, your personal and project skills, plugin commands and `.claude/commands` work in every chat and appear in the Telegram command menu.
+- **Chat titles.** A chat without a name of yours is titled after its first prompt; names you give are never overwritten. `/rename` renames both the chat and the session.
 - **Photos and files.** Photos are sent to Claude as images. Documents are saved under `<project>/.tg-uploads/` and the path is passed to Claude.
-- **Status.** Notices for context compaction, API retries, usage-limit warnings and permission denials. `/status` in a tab shows that session's context usage; in the main view it shows the process pool.
+- **Status.** Notices for context compaction, API retries, usage-limit warnings and permission denials. `/status` shows this chat's session (with context usage) and the bot's process pool.
 
 ## Commands
 
-### Main view
+All bot commands work in every chat and don't involve Claude.
 
-| Command | Description |
-|---|---|
-| `/projects` | List projects, buttons to switch the active one |
-| `/project add <name> <path>` | Register a project directory (must exist and be inside `ALLOWED_ROOTS` if set) and make it active |
-| `/project use <name>` · `/project rm <name>` | Switch the active project · remove one (its tabs keep working) |
-| `/new [title]` | Open a new tab in the active project |
-| `/resume [all\|id]` | Open a past session (active project, all projects, or by ID) in a tab |
-| `/sessions` | Your tabs with state: 🟢 busy, 🟡 idle, ⚪ hibernated |
-| `/settings` | Defaults for new tabs: model, permission mode, effort, verbose |
-| `/status` | Live processes, waiting messages, memory, Claude Code version |
-| `/help` | Help for the current view |
-
-Text in the main view is not sent to Claude; the bot answers with a hint.
-
-### In a tab
+### This chat's session
 
 | Command | Description |
 |---|---|
 | `/stop` | Interrupt the running turn, cancel open prompts and a message still waiting for a slot |
-| `/model [name]` · `/mode [mode]` · `/effort [level]` | Show (buttons) or change this tab's model, permission mode or effort |
-| `/verbose` | Toggle tool output and timings for this tab |
-| `/status` | Session ID, project, settings, process state, context usage |
-| `/rename <title>` | Rename this session and tab |
-| `/fork` | Copy this session into a new tab |
-| `/close` | Stop this tab's process now; your next message resumes it |
-| `/delete` | Delete the tab and its messages after confirmation (the session stays resumable) |
-| `/new`, `/resume`, `/help` | As in the main view |
+| `/model [name]` · `/mode [mode]` · `/effort [level]` | Show (buttons) or change this chat's model, permission mode or effort; also before the first message |
+| `/verbose` | Toggle tool output and timings for this chat |
+| `/rename <title>` | Rename this chat and its session |
+| `/fork` | Copy this session into a new chat |
+| `/close` | Stop this chat's process now; your next message resumes it |
+| `/delete` | Delete the chat and its messages after confirmation (the session stays resumable) |
+
+### Bot
+
+| Command | Description |
+|---|---|
+| `/help` | How the bot works and the command list |
+| `/status` | This chat's session plus live processes, waiting messages, memory, Claude Code version |
+| `/sessions` | Chats with a session and their state (🟢 busy, 🟡 idle, ⚪ hibernated); tap one to jump there |
+| `/resume [all\|id]` | Open a past session (active project, all projects, or by ID) in a new chat |
+| `/projects` | List projects, buttons to switch the active one |
+| `/project add <name> <path>` | Register a project directory (must exist and be inside `ALLOWED_ROOTS` if set) and make it active |
+| `/project use <name>` · `/project rm <name>` | Switch the active project (also moves this chat if it hasn't talked to Claude yet) · remove one |
+| `/settings` | Defaults for new chats: model, permission mode, effort, verbose |
+
+There is no `/new`: go back to the bot's main screen and type to start a new chat.
 
 Every other slash command goes to Claude Code unchanged: `/compact`, `/context`, `/usage`, `/clear`, `/init`, `/config key=value`, `/output-style`, `/code-review`, and all your skills and plugin commands, with arguments.
 
-Telegram menu names must match `[a-z0-9_]`, so `code-review` appears as `/code_review` and `plugin:skill` as `/plugin_skill`. Either spelling works. Commands used in the wrong place get a one-line redirect.
+Telegram menu names must match `[a-z0-9_]`, so `code-review` appears as `/code_review` and `plugin:skill` as `/plugin_skill`. Either spelling works.
 
 ## Sessions and processes
 
 A session is not a process. A Claude Code session lives in its transcript on disk. A running Claude Code process is only needed while the session is working.
 
-- A tab's process starts on its first message, or resumes when the session already exists.
-- After `SESSION_IDLE_MINUTES` (15) without activity, the process is closed. Your next message in that tab resumes the session; a resume takes about a second.
+- A chat's process starts on its first message, or resumes when the session already exists.
+- After `SESSION_IDLE_MINUTES` (15) without activity, the process is closed. Your next message in that chat resumes the session; a resume takes about a second.
 - At most `MAX_LIVE_SESSIONS` (3) processes run at once. When a new one is needed, the least recently used idle process is closed. If every process is busy, the message waits ("⏳ waiting for a free slot"), and `/stop` cancels the wait.
 - A process is never closed while it is working, waiting for your answer to a prompt, or running background tasks (background tasks are capped at `BACKGROUND_MAX_MINUTES`).
-- Settings that live inside the process (model, permission mode, effort) are stored per tab and restored on every resume.
-- After a bot restart every tab is hibernated and resumes on its next message.
+- Settings that live inside the process (model, permission mode, effort) are stored per chat and restored on every resume.
+- After a bot restart every chat is hibernated and resumes on its next message.
 
 The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Permissions and safety
 
 - **Who can talk to it.** Only the Telegram user IDs in `ALLOWED_USER_IDS`, and only in private chats. Anyone else gets a single reply with their user ID, so you can add it if you want to. Groups are ignored. The bot refuses to start without an allowlist.
-- **Default mode: `auto`.** Claude Code's classifier approves routine actions; anything it escalates arrives as buttons. If auto mode isn't available for your account or model, the tab switches to `acceptEdits` and tells you.
+- **Default mode: `auto`.** Claude Code's classifier approves routine actions; anything it escalates arrives as buttons. If auto mode isn't available for your account or model, the chat switches to `acceptEdits` and tells you.
 - **Unanswered prompts** are denied after `PERMISSION_TIMEOUT_MS` (default 10 minutes).
 - **`bypassPermissions`** (via `/mode` or `/settings`) lets Claude run anything without asking. Use it only on a machine you're willing to let Claude change freely.
 - **Projects** can be restricted to directories under `ALLOWED_ROOTS`.
@@ -119,14 +117,14 @@ The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Requirements: [Bun](https://bun.sh) (or Node.js 24), a Telegram account, and a Claude Pro or Max subscription.
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy the token. In BotFather, open the bot → **Bot Settings → Threaded Mode** and enable it. Get your numeric user ID from [@userinfobot](https://t.me/userinfobot).
+1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy the token. In BotFather, open the bot → **Bot Settings → Threaded Mode**, enable it, and allow users to create topics (that is how you open new chats). Get your numeric user ID from [@userinfobot](https://t.me/userinfobot).
 2. Install and configure:
    ```bash
    bun install
    cp .env.example .env    # set TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, DEFAULT_CWD (first project)
    ```
 3. Sign in to Claude Code once as the same OS user: run `claude`, then `/login` (see [Authentication](#authentication-and-billing)).
-4. Optional: check that tabs work for your bot: `CHAT_ID=<your id> bun scripts/topics-spike.ts`.
+4. Optional: check that chats (topics) work for your bot: `CHAT_ID=<your id> bun scripts/topics-spike.ts`.
 5. Run it, then send `/help` to your bot:
    ```bash
    bun src/index.ts
@@ -182,7 +180,7 @@ Options: `--user`, `--dir`, `--service` to change the defaults (`claude`, `/opt/
   - first project directory writable by the service user
   - modes, effort, log level, state directory
   - process limits, and whether they fit the machine's RAM
-- **Telegram:** token accepted by `getMe`, Threaded Mode on, whether users may open tabs, webhook state.
+- **Telegram:** token accepted by `getMe`, Threaded Mode on, whether users may open new chats, webhook state.
 - **Claude sign-in:**
   - `claude auth status`
   - a live round-trip with one tiny Haiku request, since `auth status` alone can't tell whether a token is valid
@@ -203,20 +201,20 @@ Set these in `.env`. Bun loads it automatically; systemd loads it through `Envir
 | `ALLOWED_USER_IDS` | *required* | Comma-separated Telegram user IDs allowed to use the bot |
 | `DEFAULT_CWD` | home directory | Directory of the first project (`home`); add more with `/project add` |
 | `ALLOWED_ROOTS` | unrestricted | Comma-separated directories that projects must live in |
-| `DEFAULT_MODEL` | Claude Code default | Model for new tabs (`opus`, `sonnet`, a full ID…) |
-| `DEFAULT_PERMISSION_MODE` | `auto` | Permission mode for new tabs |
-| `DEFAULT_EFFORT` | model default | `low`, `medium`, `high`, `xhigh` or `max` for new tabs |
+| `DEFAULT_MODEL` | Claude Code default | Model for new chats (`opus`, `sonnet`, a full ID…) |
+| `DEFAULT_PERMISSION_MODE` | `auto` | Permission mode for new chats |
+| `DEFAULT_EFFORT` | model default | `low`, `medium`, `high`, `xhigh` or `max` for new chats |
 | `MAX_LIVE_SESSIONS` | `3` | Claude Code processes running at the same time |
 | `SESSION_IDLE_MINUTES` | `15` | Close a process after this long idle |
 | `BACKGROUND_MAX_MINUTES` | `120` | Close a process kept alive only by background tasks after this long |
 | `CLAUDE_PATH` | bundled with the SDK | Path to a system-installed `claude` binary |
-| `STATE_FILE` | `./data/state.json` | Projects, tabs and settings |
+| `STATE_FILE` | `./data/state.json` | Projects, chat ↔ session mapping and settings |
 | `STREAM_MODE` | `draft` | Live preview: `draft`, `edit`, or `off` |
 | `PERMISSION_TIMEOUT_MS` | `600000` | Auto-deny prompts after this long |
 | `LOG_LEVEL` | `info` | `debug` also logs Claude Code's stderr |
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | Optional long-lived token from `claude setup-token` |
 
-Defaults for new tabs can also be changed in Telegram with `/settings`; those per-chat defaults take precedence over the `DEFAULT_*` values. Claude Code's own configuration applies as usual: `~/.claude/settings.json`, `~/.claude/skills`, each project's `.claude/` folder, `CLAUDE.md` and `.mcp.json`.
+Defaults for new chats can also be changed in Telegram with `/settings`; those per-chat defaults take precedence over the `DEFAULT_*` values. Claude Code's own configuration applies as usual: `~/.claude/settings.json`, `~/.claude/skills`, each project's `.claude/` folder, `CLAUDE.md` and `.mcp.json`.
 
 ## Authentication and billing
 
@@ -227,18 +225,19 @@ Two ways to sign in the service user:
 - **Interactive, once:** run `claude`, then `/login`, or `sudo bash deploy/deploy.sh login`. Credentials are stored in `~/.claude/` and refresh automatically. The SDK's bundled binary reads the same location.
 - **Long-lived token:** run `claude setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
 
-Usage counts against your plan's normal limits; parallel tabs use it faster. Anthropic announced, then [paused](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan), a change that would bill Agent SDK usage from a separate monthly credit. If that change resumes, this bot's usage will come from that credit.
+Usage counts against your plan's normal limits; parallel chats use it faster. Anthropic announced, then [paused](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan), a change that would bill Agent SDK usage from a separate monthly credit. If that change resumes, this bot's usage will come from that credit.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | Anything unclear | Run `sudo bash deploy/deploy.sh check` first; every ✗ comes with a hint |
-| `/new` says tabs are off | Enable **Threaded Mode** in @BotFather → your bot → Bot Settings, then restart the bot |
+| The bot says Threaded Mode is off | Enable **Threaded Mode** in @BotFather → your bot → Bot Settings, then restart the bot |
+| Typing on the main screen doesn't open a new chat | In @BotFather's Threaded Mode settings, allow users to create topics |
 | `Failed to authenticate: OAuth session expired` | The service user's login expired. Run `sudo bash deploy/deploy.sh login` |
-| "⏳ waiting for a free slot" | All `MAX_LIVE_SESSIONS` processes are busy. Wait, `/stop` another tab, or raise the limit |
-| "Auto mode isn't available…" | Expected on some accounts or models. The tab switched to `acceptEdits`; use `/mode` to choose another |
-| A tab I deleted is mentioned in the main view | Expected: its session is kept on disk; reopen it with `/resume` if needed |
+| "⏳ waiting for a free slot" | All `MAX_LIVE_SESSIONS` processes are busy. Wait, `/stop` another chat, or raise the limit |
+| "Auto mode isn't available…" | Expected on some accounts or models. The chat switched to `acceptEdits`; use `/mode` to choose another |
+| I deleted a chat by mistake | Its session is kept on disk; reopen it with `/resume` |
 | Live preview doesn't update | Set `STREAM_MODE=edit` (the bot also falls back automatically if drafts fail) |
 | Bot doesn't respond at all | Check your ID is in `ALLOWED_USER_IDS`, you're in a private chat, and `journalctl -u tg-cc-bot` shows `polling` |
 
@@ -257,7 +256,7 @@ Source files use explicit `.ts` import extensions and only erasable TypeScript s
 
 ## Limitations
 
-- **Private chats only.** Groups are ignored. Several allowed users each get their own chat, tabs and defaults, but share projects and the process limit.
+- **Private chats only.** Groups are ignored. Several allowed users each get their own chats and defaults, but share projects and the process limit.
 - **One poller per token.** Don't run a second copy of the bot (for example a dev copy) with the same token.
 - **Media.** Text, photos and documents only (no voice or video). Telegram limits bot downloads to 20 MB.
 - **Terminal-only commands** (`/theme`, `/login`, `/terminal-setup`, interactive `/config` menus) aren't available in SDK sessions.

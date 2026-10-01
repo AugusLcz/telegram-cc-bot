@@ -479,9 +479,10 @@ check_telegram() {
       hint "@BotFather → your bot → Bot Settings → Threaded Mode → enable, then: sudo $0 update"
     fi
     if [[ $body == *'"allows_users_to_create_topics":true'* ]]; then
-      ok "Users may open tabs with the + button"
+      ok "Users may open new chats (each new chat is a Claude session)"
     else
-      info "The + button is disabled for users; /new still opens tabs"
+      warn "Users cannot open new chats themselves, so they cannot start new sessions"
+      hint "@BotFather → your bot → Bot Settings → Threaded Mode: allow users to create topics"
     fi
   elif [[ $body == *'"error_code":401'* ]]; then
     bad "Bot token rejected by Telegram (401 Unauthorized)"

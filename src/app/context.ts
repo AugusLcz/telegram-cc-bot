@@ -21,7 +21,7 @@ export interface BotInfo {
   username: string;
   /** Threaded Mode (topics in private chats) is enabled in @BotFather. */
   hasTopics: boolean;
-  /** Users may create tabs with Telegram's "+" button. */
+  /** Users may open new chats (topics) themselves; a BotFather setting. */
   usersCreateTopics: boolean;
 }
 
@@ -45,6 +45,14 @@ export interface App {
   commands: CommandRegistry<App>;
   callbacks: CallbackRouter<App>;
   startedAt: number;
+  /**
+   * Names of chats Telegram announced (forum_topic_created) that have no
+   * record yet. A record is only created once the chat needs a session, so
+   * chats used just for bot commands leave nothing behind.
+   */
+  topicNames: Map<ThreadKey, { name: string; implicit: boolean }>;
+  /** Chats whose session-start line was already posted (this process). */
+  announced: Set<ThreadKey>;
   /** A send found the tab deleted. */
   onTopicGone(key: ThreadKey): Promise<void>;
 }

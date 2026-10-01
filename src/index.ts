@@ -6,9 +6,7 @@ import { sdkSessionApi } from "./claude/sessions.ts";
 import { loadConfig } from "./core/config.ts";
 import { createLogger } from "./core/logger.ts";
 import { JsonFileStore } from "./store/store.ts";
-import { sendHtml } from "./telegram/send.ts";
 import { createApp, syncMenu } from "./app/bot.ts";
-import { THREADED_MODE_HINT } from "./app/views.ts";
 
 const cfg = loadConfig();
 const log = createLogger(cfg.logLevel);
@@ -27,7 +25,7 @@ const botInfo = {
   hasTopics: me.has_topics_enabled === true,
   usersCreateTopics: me.allows_users_to_create_topics === true,
 };
-if (!botInfo.hasTopics) log.warn("Threaded Mode is off in @BotFather: tabs are unavailable, only the main view works");
+if (!botInfo.hasTopics) log.warn("Threaded Mode is off in @BotFather: the bot cannot keep separate sessions until it is enabled");
 
 const store = new JsonFileStore(cfg.stateFile, { log: log.child("store") });
 const factory = new SdkProcessFactory({ claudePath: cfg.claudePath, log: log.child("claude") });
@@ -52,10 +50,9 @@ const runner = run(bot, { runner: { fetch: { allowed_updates: ["message", "callb
 log.info(
   `@${botInfo.username} polling · tabs ${botInfo.hasTopics ? "on" : "OFF"} · max ${cfg.maxLiveSessions} live sessions · idle ${cfg.sessionIdleMs / 60_000}m`,
 );
-for (const chatId of app.chats.chatIds()) {
-  const html = botInfo.hasTopics ? "🟢 Online. Your tabs resume on the next message." : `🟢 Online.\n${THREADED_MODE_HINT}`;
-  sendHtml(bot.api, { chatId }, html).catch((err) => log.warn(`online notice to ${chatId} failed:`, err));
-}
+// Chats that only ever saw bot commands keep no session; forget their leftovers after a week.
+const pruned = app.threads.pruneEmpty(7 * 24 * 60 * 60_000);
+if (pruned) log.info(`forgot ${pruned} chat(s) that never started a session`);
 
 let stopping = false;
 async function shutdown(signal: string): Promise<void> {

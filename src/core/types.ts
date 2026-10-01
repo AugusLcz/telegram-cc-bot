@@ -14,7 +14,7 @@ export const PERMISSION_MODES: readonly PermissionMode[] = [
   "bypassPermissions",
 ];
 
-/** Where a Telegram message goes: the main view (no threadId) or a tab. */
+/** Where a Telegram message goes: a chat (topic, threadId) or, without Threaded Mode, the bot's root (no threadId). */
 export interface Target {
   chatId: number;
   threadId?: number;

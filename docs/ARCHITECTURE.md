@@ -1,8 +1,9 @@
 # tg-cc-bot architecture
 
-tg-cc-bot lets a Telegram private chat drive Claude Code on a server. Each **tab** of the chat
-(Telegram's topics in private chats) is one **Claude Code session** working in a chosen **project**.
-The chat's **main view** is a command-only control panel.
+tg-cc-bot lets a Telegram private chat drive Claude Code on a server. With Threaded Mode enabled, the
+bot's conversation is split into **chats** (Telegram topics in a private chat). Every message typed on
+the bot's main screen opens a new chat. **Each chat is one Claude Code session** working in a chosen
+**project**. Bot commands are mechanical (no Claude involved) and work in every chat.
 
 This document describes the design. It is the reference for anyone changing the code: when the code and
 this document disagree, fix one of them.
@@ -13,14 +14,15 @@ this document disagree, fix one of them.
 
 **Goals**
 
-1. One tab = one Claude Code session, running in a pre-selected project directory, with everything
-   Claude Code loads there: skills, `CLAUDE.md`, MCP servers, hooks, plugins, settings.
-2. The main view only handles bot mechanics (projects, defaults, session overview, status) and only
-   through commands. Claude never talks there.
+1. One chat = one Claude Code session, running in a project directory, with everything Claude Code
+   loads there: skills, `CLAUDE.md`, MCP servers, hooks, plugins, settings.
+2. Bot mechanics (projects, defaults, session overview, status, per-chat settings) are slash commands
+   that never involve Claude and work in any chat. A chat used only for such commands does not become
+   a session.
 3. Users not in the allowlist learn their Telegram user ID and nothing else.
 4. Bounded resource use. Sessions can be picked up and put down at any time, like `claude --resume`,
    without keeping a process alive for every session.
-5. Robust under concurrency (several tabs streaming at once), restarts and crashes; easy to extend.
+5. Robust under concurrency (several chats streaming at once), restarts and crashes; easy to extend.
 
 **Non-goals (for now)**
 
@@ -34,9 +36,8 @@ this document disagree, fix one of them.
 
 | Concept | What it is | Lifetime | Where it lives |
 |---|---|---|---|
-| **Chat** | The private chat between one allowed user and the bot | Permanent | `state.chats[chatId]` |
-| **Main view** | Messages in the chat that are not in a tab (no `message_thread_id`, or the General thread `1`) | Permanent | none |
-| **Tab** | A Telegram topic in the private chat (`message_thread_id`) | Until the user deletes it or sends `/delete` | `state.chats[chatId].threads[threadId]` |
+| **User space** | Everything between one allowed user and the bot (Telegram's private chat) | Permanent | `state.chats[chatId]`: active project, defaults |
+| **Chat** | A topic in that private chat (`message_thread_id`). Opened by typing on the bot's main screen, or by the bot for `/resume` and `/fork` | Until the user deletes it or sends `/delete` | `state.chats[chatId].threads[threadId]`, created when the chat first needs a session |
 | **Project** | A named working directory (workspace) | Until removed | `state.projects[name]` |
 | **Session** | A Claude Code conversation, identified by a UUID | Permanent (transcript on disk) | `~/.claude/projects/<dir>/<sessionId>.jsonl` (owned by Claude Code) |
 | **Process** | A running Claude Code process serving one session | Minutes; disposable | memory only (`SessionPool`) |
@@ -44,18 +45,28 @@ this document disagree, fix one of them.
 Relations:
 
 ```
-Chat 1 ──── * Tab 1 ──── 1 Session ──── 0..1 Process
-              │
-              └── project (snapshot: name + cwd at creation)
-Chat ─── activeProject ──► Project
+User space 1 ──── * Chat 1 ──── 1 Session ──── 0..1 Process
+                     │
+                     └── project (name + cwd, fixed once the session starts)
+User space ─── activeProject ──► Project
 ```
 
-- A tab maps to exactly one *current* session. `/clear` (or "clear context" when leaving plan mode)
-  starts a new conversation, and the tab follows it. The old transcript stays resumable.
-- A session is bound to at most one tab. Resuming a session that already has a tab points to that tab
-  instead of opening a duplicate.
-- A tab's working directory is fixed when the tab is created. To work in another project, switch the
-  active project in the main view and open a new tab.
+The chat ↔ session mapping (`ThreadService`):
+
+- **Key.** A chat is identified by `chatId:threadId`. Its record holds the current `sessionId`, whether
+  the transcript exists (`started`), the working directory and the per-chat settings (model, permission
+  mode, effort, verbose). The process pool and the permission broker use the same key.
+- **Lazy binding.** A record is created the first time the chat needs a session: its first message to
+  Claude, or a per-chat setting such as `/model`. The session UUID is generated then
+  (`Options.sessionId`). Chats used only for bot commands get no record.
+- **One current session per chat.** `/clear` (or "clear context" when leaving plan mode) starts a new
+  conversation, and the chat follows it. The old transcript stays resumable.
+- **One chat per session.** Resuming a session that already has a chat points to that chat instead of
+  opening a duplicate.
+- **Fixed directory.** Until the session starts, `/project use` also moves the chat. After that the
+  directory is fixed, and `/project use` only changes where new chats start.
+- **Deleting.** Deleting a chat removes the mapping only; the transcript stays on disk and `/resume`
+  can open it again.
 
 ---
 
@@ -64,61 +75,58 @@ Chat ─── activeProject ──► Project
 ### 3.1 Access
 
 - `ALLOWED_USER_IDS` (in `.env`) is the allowlist. All allowed users are trusted equally.
-- Any other user writing to the bot in a private chat gets one reply: their numeric user ID and a note
-  to ask the owner to add it. The reply is rate-limited to once per user every 10 minutes.
+- Any other user writing to the bot gets one reply in the chat they wrote in: their numeric user ID and
+  a note to ask the owner to add it. The reply is rate-limited to once per user every 10 minutes.
 - Group, supergroup and channel updates are ignored.
 
-### 3.2 Main view (commands only)
+### 3.2 Bot commands (mechanical, in every chat)
+
+Session commands act on the chat they are sent in:
 
 | Command | Effect |
 |---|---|
-| `/start`, `/help` | Help for the current context. Warns if Threaded Mode is off in @BotFather |
-| `/projects` | List projects with the active one marked; buttons switch the active project |
-| `/project add <name> <path>` | Register a project. The path must exist, be a directory, be inside `ALLOWED_ROOTS` (if set) and be writable by the bot |
-| `/project use <name>` | Set the active project for new tabs |
-| `/project rm <name>` | Remove a project. Existing tabs keep working in their directory |
-| `/new [title]` | Create a tab in the active project with a fresh session |
-| `/resume [all]` | Pick a past session (active project, or all projects) and open it in a tab |
-| `/sessions` | Tabs and their state (🟢 busy, 🟡 idle, ⚪ hibernated), with buttons to jump to a tab |
-| `/settings` | Defaults for new tabs: model, permission mode, effort, verbose |
-| `/status` | Live processes, waiting turns, memory, Claude Code version, Threaded Mode status |
+| `/stop` | Interrupt the running turn, cancel pending prompts and a message still waiting for a slot |
+| `/model [name]`, `/mode [mode]`, `/effort [level]` | Show (buttons) or change this chat's setting. Persisted, applied live, and usable before the first message |
+| `/verbose` | Toggle tool output and timings for this chat |
+| `/rename <title>` | Rename the session and the chat |
+| `/fork` | Open a new chat with a fork of this session |
+| `/close` | Hibernate now: stop the process, keep the chat |
+| `/delete` | After confirmation: hibernate and delete the chat with its messages. The transcript stays resumable |
 
-Text, photos and files in the main view get a short hint pointing to `/new` or an existing tab.
-
-### 3.3 Tabs
-
-Text, photos and files go to the tab's Claude session. Commands handled by the bot:
+Bot-wide commands:
 
 | Command | Effect |
 |---|---|
-| `/stop` | Interrupt the running turn, cancel pending prompts and queued messages of this tab |
-| `/model [name]`, `/mode [mode]`, `/effort [level]` | Show (buttons) or change this tab's setting. Persisted and applied live |
-| `/verbose` | Toggle tool output and timings for this tab |
-| `/status` | Session ID, title, project, process state, context usage |
-| `/rename <title>` | Rename the session and the tab |
-| `/fork` | Open a new tab with a fork of this session |
-| `/close` | Hibernate now: stop the process, keep the tab |
-| `/delete` | After confirmation: hibernate and delete the tab with its messages. The transcript stays resumable |
-| `/new`, `/resume` | Open another tab, same as in the main view |
-| `/help` | Help for tabs |
+| `/start`, `/help` | How the bot works and the command list. Warns if Threaded Mode is off |
+| `/status` | This chat's session (ID, project, settings, process state, context usage) plus the bot: live processes, waiting turns, memory, Claude Code version |
+| `/sessions` | Chats with a session and their state (🟢 busy, 🟡 idle, ⚪ hibernated); buttons post a "👋" into a chat to jump there |
+| `/resume [all\|id]` | Pick a past session (active project, all projects, or by ID) and open it in a new chat |
+| `/projects` | List projects with the active one marked; buttons switch it |
+| `/project add <name> <path>` | Register a project (must exist, be a directory, be inside `ALLOWED_ROOTS` if set, be writable) and make it active |
+| `/project use <name>` | Make it active for new chats, and for this chat if its session has not started |
+| `/project rm <name>` | Remove a project. Chats that use it keep working in their directory |
+| `/settings` | Defaults for new chats: model, permission mode, effort, verbose |
 
 Any other `/command` goes to Claude Code unchanged: `/compact`, `/context`, `/usage`, `/clear`,
-skills, plugin commands. The Telegram menu spells `code-review` as `code_review`. The bot maps menu
-spellings back. Commands used in the wrong place get a one-line redirect.
+skills, plugin commands. The Telegram menu spells `code-review` as `code_review`; the bot maps menu
+spellings back.
 
-### 3.4 Opening tabs
+### 3.3 Opening chats
 
-- **`/new`**: the bot creates the topic (`createForumTopic`), generates the session UUID, stores the tab,
-  and posts a header (`📁 project · new session`).
-- **Telegram's "+" button**: the bot receives `forum_topic_created` (or, if that was missed, the first
-  message in an unknown thread). It binds the tab to the chat's active project and posts the same header.
-- **`/resume`**: opens the chosen session in a new tab, named after the session, with a short recap of
-  the last exchange. If the session already has a tab, the bot posts "👋 here" in that tab instead.
-- **`/fork`**: forks the transcript (`forkSession`) and opens it in a new tab.
+- **Typing on the bot's main screen** opens a new chat. Telegram sends `forum_topic_created` (the bot
+  only remembers the name) and the message itself. The first message to Claude binds the chat to the
+  active project, posts one line (`📁 project · cwd · new session`) and starts the session.
+- **`/resume`** opens the chosen session in a new chat (`createForumTopic`), named after the session,
+  with a short recap of the last exchange.
+- **`/fork`** forks the transcript (`forkSession`) and opens it in a new chat.
+- There is no `/new`: going back to the main screen and typing is the new-chat gesture.
 
-**Titles.** A tab created without an explicit name (`/new` without a title, or a "+" tab whose name is
-implicit) is renamed after its first prompt (first line, at most 40 characters). Names the user typed,
-or later renames by the user (`forum_topic_edited`), are never overwritten by the bot.
+**Titles.** A chat whose name Telegram marks as implicit is renamed after its first prompt (first
+line, at most 40 characters). Names the user typed, or later renames by the user
+(`forum_topic_edited`), are never overwritten by the bot.
+
+**Outside chats.** Without Threaded Mode every message arrives without a `message_thread_id`. The bot
+then answers with how to enable Threaded Mode and starts no session. Bot commands still work.
 
 ---
 
@@ -139,7 +147,7 @@ The conversation's durable state is its transcript, which Claude Code writes to 
 
 ```mermaid
 stateDiagram-v2
-    [*] --> COLD : tab created
+    [*] --> COLD : chat bound
     COLD --> STARTING : message / command needs a process
     STARTING --> BUSY : started, message sent
     STARTING --> COLD : start failed
@@ -147,7 +155,7 @@ stateDiagram-v2
     IDLE --> BUSY : new message
     IDLE --> COLD : idle TTL, LRU eviction, /close
     BUSY --> COLD : crash, background cap reached
-    COLD --> [*] : /delete or tab gone
+    COLD --> [*] : /delete or chat gone
 ```
 
 A process is **BUSY** while any of these hold:
@@ -170,13 +178,13 @@ BUSY processes are never evicted.
 **Admission.** When a session needs a process and the pool is full:
 
 1. evict the least recently used IDLE process;
-2. if every process is BUSY, the request waits in a FIFO queue. The tab shows
-   "⏳ waiting for a free slot". `/stop` in that tab cancels the wait. Slots are handed to waiters as
+2. if every process is BUSY, the request waits in a FIFO queue. The chat shows
+   "⏳ waiting for a free slot". `/stop` in that chat cancels the wait. Slots are handed to waiters as
    soon as any process closes.
 
 Slots are reserved synchronously before any `await`, so concurrent starts can never exceed the limit.
 
-**Settings that live inside the process** (model, permission mode, effort) are written to the tab's
+**Settings that live inside the process** (model, permission mode, effort) are written to the chat's
 record *before* being applied to a live process, and passed again on every resume. Hibernation never
 loses them.
 
@@ -184,12 +192,12 @@ loses them.
 
 | Event | Handling |
 |---|---|
-| Process crashes | Session goes COLD, pending prompts are denied, the tab gets a notice. The next message resumes |
-| `auto` mode not available for the account or model | On the first `init`, the tab switches to `acceptEdits` (persisted) and says so once |
+| Process crashes | Session goes COLD, pending prompts are denied, the chat gets a notice. The next message resumes |
+| `auto` mode not available for the account or model | On the first `init`, the chat switches to `acceptEdits` (persisted) and says so once |
 | Claude changes mode itself (e.g. leaving plan mode) | The new mode from the `status` message is persisted, so a resume keeps it |
-| Resume fails because the transcript is gone | The tab gets a new session ID, the user is told it starts fresh, and the message is sent there |
-| Start times out (60 s) | Slot released, error shown in the tab |
-| Bot restarts | Everything starts COLD; tabs and settings come back from the state file |
+| Resume fails because the transcript is gone | The chat gets a new session ID, the user is told it starts fresh, and the message is sent there |
+| Start times out (60 s) | Slot released, error shown in the chat |
+| Bot restarts | Everything starts COLD; chats and settings come back from the state file |
 | Shutdown (SIGTERM) | Stop polling, deny pending prompts, close processes (resumable), flush state |
 
 ---
@@ -248,23 +256,23 @@ src/
     send.ts               send/edit/markdown/draft/typing; error classification
     format.ts             Markdown → Telegram HTML, fence-safe splitting
     topics.ts             create/rename/delete topics, titles
-    render.ts             TurnRenderer: one per tab, turns SDK messages into Telegram messages
-    permissions.ts        PermissionBroker: canUseTool → buttons, per tab
+    render.ts             TurnRenderer: one per chat, turns SDK messages into Telegram messages
+    permissions.ts        PermissionBroker: canUseTool → buttons, per chat
     limiter.ts            per-chat budget for best-effort traffic (drafts, status edits)
     media.ts              photo/document download
     tools.ts              tool icons and one-line summaries
   domain/
     chats.ts              ChatService: per-chat active project and defaults
     projects.ts           ProjectService: validation, active project
-    threads.ts            ThreadService: tabs ↔ sessions ↔ processes (+ TopicGateway port)
+    threads.ts            ThreadService: chats ↔ sessions ↔ processes (+ TopicGateway port)
     access.ts             AccessControl
     errors.ts             UserError: expected failures shown to the user as is
   app/
-    registry.ts           CommandRegistry and CallbackRouter
+    registry.ts           CommandRegistry (every command in every chat) and CallbackRouter
     context.ts            App (services handed to handlers), RendererRegistry
-    views.ts              shared HTML pieces: tab headers, keyboards, replies
-    main.ts               main-view commands and buttons (+ /help, /new, /resume for both places)
-    thread.ts             tab commands, buttons, message handling, passthrough
+    views.ts              shared HTML pieces: chat headers, keyboards, replies
+    control.ts            bot-wide commands and buttons (/help, /status, /projects, /resume …)
+    thread.ts             chat ↔ session: lazy binding, message handling, session commands, passthrough
     bot.ts                createApp(): wiring, access gate, error boundary, routing; syncMenu()
 scripts/
   topics-spike.ts         checks private-chat topics against the real Bot API
@@ -291,7 +299,7 @@ interface ProcessHandle {
 }
 interface ProcessFactory { create(spec: ProcessSpec, hooks: ProcessHooks): ProcessHandle }
 
-// claude/pool.ts: keyed by an opaque string (the tab key)
+// claude/pool.ts: keyed by an opaque string (the chat key)
 class SessionPool {
   state(key): "cold" | "starting" | "idle" | "busy";
   send(key, spec: () => ProcessSpec, content): Promise<void>;
@@ -301,7 +309,7 @@ class SessionPool {
 }
 ```
 
-The pool takes the spec as a *function*, so a restart always reads the tab's latest persisted settings.
+The pool takes the spec as a *function*, so a restart always reads the chat's latest persisted settings.
 
 ---
 
@@ -318,7 +326,7 @@ interface State {
     defaults: { model?: string; permissionMode: PermissionMode; effort?: Effort; verbose: boolean };
     threads: Record<string /* threadId */, {
       threadId: number;
-      sessionId: string;           // current session of the tab
+      sessionId: string;           // current session of the chat
       started: boolean;            // transcript exists → resume instead of create
       project: string; cwd: string;  // snapshot at creation
       title: string; titleSource: "placeholder" | "auto" | "user";
@@ -330,6 +338,8 @@ interface State {
 ```
 
 - Bootstrap: with no projects, a project `home` is created from `DEFAULT_CWD`.
+- A record exists only for chats that needed a session. Records that never started one (for example a
+  chat where only `/model` was set) are pruned at startup after 7 days.
 - A corrupt state file is moved aside (`state.json.corrupt-<time>`) and the bot starts empty, logging a
   warning, instead of refusing to start.
 - Session transcripts are owned by Claude Code and are never written by the bot.
@@ -338,29 +348,30 @@ interface State {
 
 ## 7. Flows
 
-**Message in a tab**
+**Message in a chat**
 
-1. `bot.ts` classifies the update (chat, thread). Updates of the same tab are processed in order;
-   different tabs run concurrently.
-2. `ThreadService.send(key, content)` runs under the tab's mutex. The handler does not wait for it, so
-   `/stop` in the same tab stays responsive.
+1. `bot.ts` classifies the update (chat, thread). Updates of the same chat are processed in order;
+   different chats run concurrently.
+2. `ThreadService.send(key, content)` runs under the chat's mutex. The handler does not wait for it, so
+   `/stop` in the same chat stays responsive.
 3. `SessionPool.send`: the process is reused if it is live; otherwise a slot is reserved and the process
-   starts (or resumes) from the tab's spec.
+   starts (or resumes) from the chat's spec.
 4. SDK messages flow `pool → ThreadService.observe` (session ID, `started`, activity) and
    `→ TurnRenderer` (preview, tool status, final reply).
 5. `result`: the turn ends. If nothing else keeps the session BUSY, the idle timer starts.
 
-**Eviction and resume.** The idle timer fires, or the LRU entry is evicted for another tab. The process
+**Eviction and resume.** The idle timer fires, or the LRU entry is evicted for another chat. The process
 closes and the state becomes COLD. Nothing is sent to the user. The next message runs the start path
 with `resume: true`.
 
-**Permission prompt.** Claude Code calls `canUseTool` and the broker posts buttons in that tab. The pool
-marks the session blocked (BUSY). The answer resolves the callback and unblocks. Free text in the tab
+**Permission prompt.** Claude Code calls `canUseTool` and the broker posts buttons in that chat. The pool
+marks the session blocked (BUSY). The answer resolves the callback and unblocks. Free text in the chat
 while a prompt is open answers a question or denies with feedback. The prompt is denied automatically
 after `PERMISSION_TIMEOUT_MS`.
 
-**Tab deleted by the user.** Telegram sends no update for this. The next send to the tab fails with
-"message thread not found". The tab is unbound, its process hibernated, and the main view gets a note.
+**Chat deleted by the user.** Telegram sends no update for this. The next send to the chat fails with
+"message thread not found". The chat is unbound and its process hibernated; this is logged (there is
+no chat left to report it in). The session stays resumable.
 The session stays resumable.
 
 **Unknown user.** The access middleware stops the update and (rate-limited) replies with the user ID.
@@ -369,26 +380,28 @@ The session stays resumable.
 
 ## 8. Concurrency model
 
-- Updates: `@grammyjs/runner` with `sequentialize` keyed by `chatId:threadId` (`main` for the main view).
-  Order is kept within a tab; tabs and chats are concurrent.
-- Tab state changes (start, send, settings, fork, delete): `KeyedMutex` per tab key in
+- Updates: `@grammyjs/runner` with `sequentialize` keyed by `chatId:threadId` (`main` outside chats).
+  Order is kept within a chat; different chats run concurrently.
+- Chat state changes (start, send, settings, fork, delete): `KeyedMutex` per chat key in
   `ThreadService`.
-- Turns are fire-and-forget from the handler's point of view; errors are reported to the tab.
+- Turns are fire-and-forget from the handler's point of view; errors are reported to the chat.
 - Pool admission: synchronous slot accounting plus a FIFO of waiters.
 - Telegram rate limits: `@grammyjs/auto-retry` retries 429/5xx for essential calls. Best-effort traffic
-  (drafts, status edits) goes through a per-chat budget, because several tabs stream into the same chat,
-  and is skipped when over budget. Final replies are always sent, in order, per tab.
+  (drafts, status edits) goes through a per-chat budget, because several chats stream into the same chat,
+  and is skipped when over budget. Final replies are always sent, in order, per chat.
 
 ---
 
 ## 9. Telegram specifics
 
 - Threaded Mode must be enabled in @BotFather (`getMe().has_topics_enabled`). The bot checks this at
-  startup and reports it in `/start`, `/status` and the logs. Without it only the main view works.
-- `allows_users_to_create_topics = false` disables the "+" button; `/new` still works.
-- The General thread (`1`) is the main view and is addressed without `message_thread_id`.
-- Bot command menus are scoped per chat, not per topic, so the menu lists main, tab and Claude commands
-  together. The registry answers commands used in the wrong place.
+  startup and reports it in `/help`, `/status` and the logs. Without it no session can start.
+- `allows_users_to_create_topics = false` stops users from opening new chats; then only `/resume` and
+  `/fork` (which the bot opens itself) create sessions. `/help` and `deploy.sh check` warn about it.
+- A message without a thread (or in the General thread `1`) is outside any chat and never starts a
+  session. Messages to it are sent without `message_thread_id`.
+- Bot command menus are scoped per private chat, not per topic, so every chat shows the same menu: bot
+  commands plus Claude Code's. That is also why every bot command works in every chat.
 - Markdown is converted to Telegram HTML. If Telegram rejects the markup, the message is resent as plain
   text. Long replies are split fence-safely, and very long ones are sent as a `.md` file.
 - Live previews use `sendMessageDraft` and fall back to editing a placeholder message.
@@ -431,9 +444,9 @@ See `.env.example`. Notable keys:
   with persisted settings, shutdown.
 - **Domain:** ThreadService invariants with an in-memory store, the fake factory and a fake
   `TopicGateway`.
-- **Controllers:** `bot.handleUpdate()` with an API transformer that records outgoing calls: main vs tab
-  routing, unknown users, `/new` and "+" tabs bind to the active project, wrong-scope redirects, topic-gone
-  handling.
+- **Controllers:** `bot.handleUpdate()` with an API transformer that records outgoing calls: chat
+  routing, unknown users, new chats bind to the active project on first use, command-only chats leave no
+  record, `/project use` before and after a session starts, chat-gone handling.
 - **Live:** a smoke script against real Claude Code (two sessions, `MAX_LIVE_SESSIONS=1`, transparent
   resume) and `scripts/topics-spike.ts` against the real Bot API.
 
@@ -443,12 +456,14 @@ See `.env.example`. Notable keys:
 
 | Decision | Reason |
 |---|---|
-| Tab ⇔ session, project fixed per tab | Matches Claude Code's model (a session belongs to a directory); keeps `cwd` stable for the transcript |
+| Chat ⇔ session, project fixed once the session starts | Matches Claude Code's model (a session belongs to a directory); keeps `cwd` stable for the transcript |
 | Hibernate + transparent resume, bounded pool | Bounded RAM and usage; picking up and putting down sessions works like `claude --resume` |
-| Pre-generated session UUID (`Options.sessionId`) | The tab is bound before the first message; nothing depends on parsing `init` |
+| Pre-generated session UUID (`Options.sessionId`) | The chat is bound before Claude answers; nothing depends on parsing `init` |
 | Allowlist only in `.env` | Simple trust model; changes go through the deploy script |
-| Active project chosen in the main view | "+" tabs need a project without asking; one obvious place to switch |
-| Fire-and-forget turns plus a per-tab mutex | Ordered messages and responsive `/stop` at the same time |
+| Bot commands mechanical and available in every chat | Telegram's Threaded Mode has no main view to type into: every message opens or belongs to a chat |
+| Chat bound on first use, project switchable until then | Command-only chats leave nothing behind; `/project use` before talking puts the session where it belongs |
+| No `/new` | Typing on the bot's main screen already opens a new chat |
+| Fire-and-forget turns plus a per-chat mutex | Ordered messages and responsive `/stop` at the same time |
 
 Risks:
 

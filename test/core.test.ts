@@ -54,7 +54,7 @@ test("JsonFileStore moves a corrupt file aside and starts empty", () => {
   assert.equal(fs.readdirSync(dir).filter((f) => f.startsWith("state.json.corrupt-")).length, 1);
 });
 
-test("target classification: General (1) and missing thread are the main view", () => {
+test("target classification: General (1) and missing thread are outside any chat", () => {
   assert.deepEqual(targetFromMessage(5, {}), { chatId: 5 });
   assert.deepEqual(targetFromMessage(5, { message_thread_id: 1 }), { chatId: 5 });
   assert.deepEqual(targetFromMessage(5, { message_thread_id: 77 }), { chatId: 5, threadId: 77 });
@@ -93,23 +93,20 @@ test("AccessControl allowlist and reply rate limit", () => {
   assert.equal(a.shouldReply(2, 1500), true);
 });
 
-test("CommandRegistry resolves by place and builds one menu entry per name", () => {
+test("CommandRegistry: every command everywhere, grouped for help, hidden aliases", () => {
   const r = new CommandRegistry<null>();
   const run = async () => {};
-  r.register({ name: "help", scope: "both", description: "Help", run })
-    .register({ name: "projects", scope: "main", description: "Projects", run })
-    .register({ name: "status", scope: "main", description: "Status", run })
-    .register({ name: "status", scope: "thread", description: "Status", run })
-    .register({ name: "stop", scope: "thread", description: "Stop", run });
-  assert.ok(r.resolve("help", "main") && r.resolve("help", "thread"));
-  assert.equal(r.resolve("projects", "thread"), undefined);
-  assert.equal(r.otherPlace("projects", "thread"), "main");
-  assert.equal(r.otherPlace("stop", "main"), "thread");
-  assert.equal(r.otherPlace("compact", "thread"), undefined);
-  assert.notEqual(r.resolve("status", "main"), r.resolve("status", "thread"));
-  assert.deepEqual(r.menu().map((m) => m.command), ["help", "projects", "status", "stop"]);
-  assert.deepEqual(r.list("thread").map((d) => d.name), ["help", "status", "stop"]);
-  assert.throws(() => r.register({ name: "stop", scope: "both", description: "x", run }), /twice/);
+  r.register({ name: "help", group: "bot", description: "Help", run })
+    .register({ name: "start", group: "bot", description: "Help", hidden: true, run })
+    .register({ name: "projects", group: "bot", description: "Projects", run })
+    .register({ name: "stop", group: "chat", description: "Stop", run });
+  assert.ok(r.get("projects") && r.get("stop") && r.get("start"));
+  assert.equal(r.get("compact"), undefined, "Claude commands are not bot commands");
+  assert.deepEqual(r.menu().map((m) => m.command), ["help", "projects", "stop"]);
+  assert.deepEqual(r.list("chat").map((d) => d.name), ["stop"]);
+  assert.deepEqual(r.list("bot").map((d) => d.name), ["help", "projects"]);
+  assert.ok(r.names().has("start"), "hidden aliases still reserve their name");
+  assert.throws(() => r.register({ name: "stop", group: "chat", description: "x", run }), /twice/);
 });
 
 test("CallbackRouter dispatches by prefix", async () => {

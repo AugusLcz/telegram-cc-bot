@@ -85,7 +85,7 @@ export class ThreadService {
 
   require(key: ThreadKey): ThreadRecord {
     const r = this.get(key);
-    if (!r) throw new UserError("This tab is not linked to a session.");
+    if (!r) throw new UserError("This chat has no session yet. Send a message to start one.");
     return r;
   }
 
@@ -120,18 +120,11 @@ export class ThreadService {
 
   // ---- opening tabs ------------------------------------------------------
 
-  /** /new: create a tab in the chat's active project with a fresh session. */
-  async createTab(chatId: number, title?: string): Promise<Tab> {
-    const project = this.d.projects.activeFor(chatId);
-    const name = title?.trim() || PLACEHOLDER_TITLE;
-    const threadId = await this.d.topics.create(chatId, name);
-    return this.save(chatId, this.newRecord(chatId, threadId, project, name, title?.trim() ? "user" : "placeholder"));
-  }
-
   /**
-   * A tab the bot has not seen yet (created with Telegram's "+" button, or
-   * lost state): bind it to the active project. Returns `created: false`
-   * when the tab was already known.
+   * Bind a chat (tab) the bot has not seen yet to a fresh session in the
+   * active project. With Threaded Mode, every new chat opened from the bot's
+   * main screen arrives this way. Returns `created: false` when the tab was
+   * already known.
    */
   bindTab(chatId: number, threadId: number, name?: string, implicitName = false): Tab & { created: boolean } {
     const key = threadKey(chatId, threadId);
@@ -276,6 +269,37 @@ export class ThreadService {
       record.titleSource = "user";
     });
     await this.renameSession(record, title);
+  }
+
+  /**
+   * Move a chat whose session has not started yet to another project.
+   * Returns false when the session already started (its directory is fixed).
+   */
+  setProject(key: ThreadKey, project: ProjectRecord): boolean {
+    const record = this.get(key);
+    if (!record) return true; // will be bound to the (new) active project on first use
+    if (record.started || this.d.pool.state(key) !== "cold") return false;
+    this.d.store.update(() => {
+      record.project = project.name;
+      record.cwd = project.path;
+    });
+    return true;
+  }
+
+  /** Forget chats that never started a session and were idle longer than `olderThanMs`. */
+  pruneEmpty(olderThanMs: number, now = Date.now()): number {
+    let removed = 0;
+    this.d.store.update((d) => {
+      for (const chat of Object.values(d.chats)) {
+        for (const [threadId, r] of Object.entries(chat.threads)) {
+          if (!r.started && now - r.lastActiveAt > olderThanMs) {
+            delete chat.threads[threadId];
+            removed++;
+          }
+        }
+      }
+    });
+    return removed;
   }
 
   // ---- lifecycle -----------------------------------------------------------

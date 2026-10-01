@@ -21,10 +21,10 @@ import { sendHtml, TopicGoneError } from "../telegram/send.ts";
 import { keyOf, sequenceKey, targetOf } from "../telegram/target.ts";
 import { titleFromPrompt, TelegramTopics } from "../telegram/topics.ts";
 import { RendererRegistry, type App, type BotInfo } from "./context.ts";
-import { registerMain } from "./main.ts";
+import { registerControl } from "./control.ts";
 import { CallbackRouter, CommandRegistry } from "./registry.ts";
-import { ensureTab, handleThreadInput, passThrough, registerThread } from "./thread.ts";
-import { reply, replyTo } from "./views.ts";
+import { handleThreadInput, passThrough, registerThread } from "./thread.ts";
+import { NO_CHAT_HINT, reply, replyTo, THREADED_MODE_HINT } from "./views.ts";
 
 export interface CreateAppOptions {
   cfg: Config;
@@ -141,43 +141,43 @@ export function createApp(opts: CreateAppOptions): App {
     commands: new CommandRegistry<App>(),
     callbacks: new CallbackRouter<App>(),
     startedAt: Date.now(),
+    topicNames: new Map(),
+    announced: new Set(),
     onTopicGone: async (key: ThreadKey) => {
+      // The user deleted the chat, so there is nowhere to report this; the session stays resumable.
       app.renderers.dispose(key);
       app.broker.cancel(key);
+      app.announced.delete(key);
       const record = await app.threads.topicGone(key);
-      if (!record) return;
-      log.info(`tab ${key} is gone; session ${record.sessionId} hibernated`);
-      const { chatId } = targetOfKey(key);
-      await sendHtml(
-        api,
-        { chatId },
-        `🗑 The tab <b>${escapeHtml(truncate(record.title, 60))}</b> no longer exists. Its session is kept; reopen it with /resume.`,
-      ).catch(() => {});
+      if (record) log.info(`chat ${key} was deleted; session ${record.sessionId} hibernated (reopen with /resume)`);
     },
   } satisfies App);
 
-  registerMain(app);
+  registerControl(app);
   registerThread(app);
   installHandlers(app, bot);
   return app;
 }
 
 function installHandlers(app: App, bot: Bot): void {
-  // Updates of one tab (or of a chat's main view) are handled in order; others concurrently.
+  // Updates of one chat are handled in order; different chats run concurrently.
   bot.use(sequentialize(sequenceKey));
   bot.use((ctx, next) => accessGate(app, ctx, next));
   bot.use((ctx, next) => errorBoundary(app, ctx, next));
 
-  bot.on("message:forum_topic_created", async (ctx) => {
+  // A new chat: remember its name; the session is bound when the chat first needs one.
+  bot.on("message:forum_topic_created", (ctx) => {
     const key = keyOf(targetOf(ctx)!);
     const created = ctx.message.forum_topic_created;
-    if (key) await ensureTab(app, key, created.name, created.is_name_implicit === true);
+    if (key && !app.threads.get(key)) app.topicNames.set(key, { name: created.name, implicit: created.is_name_implicit === true });
   });
 
   bot.on("message:forum_topic_edited", async (ctx) => {
     const key = keyOf(targetOf(ctx)!);
     const name = ctx.message.forum_topic_edited.name;
-    if (key && name) await app.threads.topicRenamed(key, name);
+    if (!key || !name) return;
+    if (app.threads.get(key)) await app.threads.topicRenamed(key, name);
+    else app.topicNames.set(key, { name, implicit: false });
   });
 
   bot.on("message", (ctx) => route(app, ctx));
@@ -195,30 +195,20 @@ async function route(app: App, ctx: Context): Promise<void> {
   const target = targetOf(ctx)!;
   const key = keyOf(target);
   const msg = ctx.message!;
-  if (key) await ensureTab(app, key);
 
+  // Bot commands are mechanical and work in every chat; other /commands belong to Claude Code.
   const cmd = msg.text ? parseCommand(msg.text) : null;
   if (cmd) {
-    const place = key ? "thread" : "main";
-    const def = app.commands.resolve(cmd.name, place);
+    const def = app.commands.get(cmd.name);
     if (def) return def.run(app, { ctx, target, key, name: cmd.name, args: cmd.args });
-    const other = app.commands.otherPlace(cmd.name, place);
-    if (other === "main") return void (await reply(app, ctx, `/${cmd.name} works in the main view, outside tabs.`));
-    if (other === "thread") return void (await reply(app, ctx, `/${cmd.name} works inside a session tab. Open one with /new.`));
     if (key) return passThrough(app, key, cmd.name, cmd.args);
-    return void (await reply(app, ctx, `Claude commands like /${escapeHtml(cmd.name)} work inside a session tab. Open one with /new.`));
+    return void (await reply(app, ctx, app.botInfo.hasTopics ? NO_CHAT_HINT : THREADED_MODE_HINT));
   }
 
   const hasContent = msg.text !== undefined || msg.photo || msg.document;
   if (!key) {
-    if (hasContent) {
-      const project = app.projects.activeFor(target.chatId);
-      await reply(
-        app,
-        ctx,
-        `This is the control panel; Claude does not read messages here.\nOpen a session tab with /new (project <b>${escapeHtml(project.name)}</b>), or switch projects with /projects.`,
-      );
-    }
+    // Only possible without Threaded Mode (or in the General thread): no chat to bind a session to.
+    if (hasContent) await reply(app, ctx, app.botInfo.hasTopics ? NO_CHAT_HINT : THREADED_MODE_HINT);
     return;
   }
   if (hasContent) return handleThreadInput(app, ctx, key);

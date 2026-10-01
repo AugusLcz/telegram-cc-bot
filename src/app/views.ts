@@ -23,10 +23,14 @@ export const STATE_ICON: Record<SessionState, string> = {
   cold: "⚪",
 };
 
-/** First message posted into a tab. */
-export function tabHeader(record: ThreadRecord, kind: "new" | "resumed" | "forked", recap?: Recap): string {
+/** Posted once when a chat's session starts, so it is clear where Claude works. */
+export function sessionStartLine(record: ThreadRecord): string {
+  return `📁 <b>${escapeHtml(record.project)}</b> · <code>${escapeHtml(record.cwd)}</code> · new session`;
+}
+
+/** First message of a tab the bot opened itself (/resume, /fork). */
+export function tabHeader(record: ThreadRecord, kind: "resumed" | "forked", recap?: Recap): string {
   const where = `📁 <b>${escapeHtml(record.project)}</b> · <code>${escapeHtml(record.cwd)}</code>`;
-  if (kind === "new") return `${where}\n🆕 New session. Send a message to start.`;
   let html = `${kind === "forked" ? "🍴 Fork" : "▶️ Resumed"}: <b>${escapeHtml(truncate(record.title, 100))}</b>\n${where}`;
   if (recap?.user) html += `\n\n👤 ${escapeHtml(truncate(recap.user, 300))}`;
   if (recap?.assistant) html += `\n🤖 ${escapeHtml(truncate(recap.assistant, 500))}`;
@@ -41,7 +45,7 @@ export function choiceKeyboard(prefix: string, options: { label: string; value: 
   return kb;
 }
 
-/** Reply in the same place (main view or tab) as the update. */
+/** Reply in the same chat as the update. */
 export function reply(app: App, ctx: Context, html: string, keyboard?: InlineKeyboard): Promise<number> {
   return sendHtml(app.api, targetOf(ctx)!, html, { keyboard });
 }
@@ -51,4 +55,7 @@ export function replyTo(app: App, target: Target, html: string, keyboard?: Inlin
 }
 
 export const THREADED_MODE_HINT =
-  "⚠️ Tabs are off for this bot. In @BotFather open the bot → <b>Bot Settings → Threaded Mode</b>, enable it, then restart the bot.";
+  "⚠️ Threaded Mode is off for this bot, so it cannot keep separate sessions. In @BotFather open the bot → <b>Bot Settings → Threaded Mode</b>, enable it, then restart the bot.";
+
+/** Reply to Claude input that arrived outside any chat (only possible without Threaded Mode). */
+export const NO_CHAT_HINT = "Start a new chat from the bot's main screen; each chat is its own Claude session.";

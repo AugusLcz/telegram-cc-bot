@@ -40,7 +40,7 @@ function harness(opts: { hasTopics?: boolean } = {}) {
   const calls: Call[] = [];
   const goneThreads = new Set<number>();
   let messageId = 1000;
-  let threadId = 500;
+  let threadId = 900; // topics the bot creates itself (/resume, /fork)
   bot.api.config.use(async (_prev, method, payload) => {
     const p = (payload ?? {}) as Record<string, unknown>;
     calls.push({ method, payload: p });
@@ -128,90 +128,117 @@ function harness(opts: { hasTopics?: boolean } = {}) {
 
 test("strangers only learn their user ID, once per cooldown", async () => {
   const h = harness();
-  await h.send("hello", { from: STRANGER });
-  await h.send("hello again", { from: STRANGER });
+  await h.send("hello", { from: STRANGER, thread: 500 });
+  await h.send("hello again", { from: STRANGER, thread: 501 });
   const replies = h.texts();
   assert.equal(replies.length, 1);
   assert.match(replies[0], /Your Telegram user ID: <code>7<\/code>/);
   assert.equal(h.factory.created.length, 0);
+  assert.equal(h.app.threads.list(STRANGER).length, 0);
 });
 
-test("the main view is a control panel: text gets a hint, Claude commands are redirected", async () => {
+test("each new chat is its own session in the active project", async () => {
   const h = harness();
-  await h.send("hi there");
-  await h.send("/compact");
-  await h.send("/stop");
-  const [hint, claudeCmd, threadOnly] = h.texts(h.inThread(undefined));
-  assert.match(hint, /control panel/);
-  assert.match(claudeCmd, /work inside a session tab/);
-  assert.match(threadOnly, /\/stop works inside a session tab/);
-  assert.equal(h.factory.created.length, 0);
-});
-
-test("/new opens a tab in the active project and the tab talks to Claude", async () => {
-  const h = harness();
-  await h.send("/new");
-  const create = h.calls.find((c) => c.method === "createForumTopic")!;
-  assert.equal(create.payload.name, "New session");
-  const tab = 500;
-  assert.match(h.texts(h.inThread(tab))[0], /New session\. Send a message to start/);
-  assert.match(h.texts(h.inThread(undefined))[0], /Opened <b>New session<\/b> in <b>home<\/b>/);
-
-  await h.send("Fix the build", { thread: tab });
-  await waitFor(() => h.texts(h.inThread(tab)).some((t) => t.includes("reply: Fix the build")), 1000, "Claude reply in tab");
-  const proc = h.factory.last() as FakeProcess;
-  assert.equal(proc.spec.cwd, h.home);
-  assert.equal(proc.spec.resume, false);
+  await h.send("Fix the build", { thread: 500 });
+  await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: Fix the build")), 1000, "reply in chat 500");
+  const first = h.texts(h.inThread(500));
+  assert.match(first[0], /<b>home<\/b>.* · new session/, "session start line comes before the reply");
   const rename = h.calls.find((c) => c.method === "editForumTopic")!;
-  assert.equal(rename.payload.name, "Fix the build", "tab auto-titled from the first prompt");
-  assert.equal(h.app.threads.get(`${OWNER}:${tab}`)!.started, true);
+  assert.equal(rename.payload.name, "Fix the build", "chat titled from its first prompt");
+
+  await h.send("Another task", { thread: 501 });
+  await waitFor(() => h.texts(h.inThread(501)).some((t) => t.includes("reply: Another task")), 1000, "reply in chat 501");
+  assert.equal(h.factory.created.length, 2);
+  const [a, b] = [h.app.threads.get(`${OWNER}:500`)!, h.app.threads.get(`${OWNER}:501`)!];
+  assert.notEqual(a.sessionId, b.sessionId);
+  assert.equal(h.factory.created[0].spec.cwd, h.home);
+
+  await h.send("follow-up", { thread: 500 });
+  await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: follow-up")), 1000, "follow-up");
+  assert.equal(h.texts(h.inThread(500)).filter((t) => t.includes("new session")).length, 1, "start line only once");
+  assert.equal(h.calls.some((c) => c.method === "createForumTopic"), false, "the bot never needs to create chats for this");
 });
 
-test('a "+" tab binds to the active project at creation', async () => {
+test("bot commands work in any chat and leave no session behind", async () => {
   const h = harness();
-  await h.send("/project add other " + h.other);
-  await h.send("", { thread: 777, extra: { text: undefined, forum_topic_created: { name: "Topic", icon_color: 0, is_name_implicit: true } } });
-  const record = h.app.threads.get(`${OWNER}:777`)!;
-  assert.equal(record.project, "other");
-  assert.equal(record.cwd, h.other);
-  assert.equal(record.titleSource, "placeholder");
-  assert.match(h.texts(h.inThread(777))[0], /other/);
+  await h.send("/projects", { thread: 600 });
+  await h.send("/status", { thread: 601 });
+  await h.send("/settings", { thread: 602 });
+  await h.send("/sessions", { thread: 603 });
+  await h.send("/help", { thread: 604 });
+  assert.match(h.texts(h.inThread(600))[0], /Projects/);
+  assert.match(h.texts(h.inThread(601))[0], /No session in this chat yet/);
+  assert.match(h.texts(h.inThread(602))[0], /Defaults for new chats/);
+  assert.match(h.texts(h.inThread(603))[0], /No sessions yet/);
+  assert.match(h.texts(h.inThread(604))[0], /<b>This chat<\/b>[\s\S]*\/stop[\s\S]*<b>Bot<\/b>[\s\S]*\/projects/);
+  assert.doesNotMatch(h.texts(h.inThread(604))[0], /\/new\b/);
+  assert.equal(h.factory.created.length, 0);
+  assert.equal(h.app.threads.list(OWNER).length, 0, "no records for command-only chats");
 });
 
-test("messages in an unknown tab bind it lazily", async () => {
+test("/project use moves a chat that has not started; a started chat keeps its directory", async () => {
   const h = harness();
-  await h.send("hello", { thread: 888 });
-  assert.ok(h.app.threads.get(`${OWNER}:888`));
-  await waitFor(() => h.texts(h.inThread(888)).some((t) => t.includes("reply: hello")), 1000, "reply");
+  await h.send(`/project add other ${h.other}`, { thread: 700 });
+  assert.match(h.texts(h.inThread(700)).at(-1)!, /This chat and new chats use <b>other<\/b>/);
+  await h.send("hi", { thread: 700 });
+  await waitFor(() => h.factory.created.length === 1, 1000, "process");
+  assert.equal(h.factory.last().spec.cwd, h.other);
+  await waitFor(() => h.app.threads.get(`${OWNER}:700`)!.started, 1000, "started");
+
+  await h.send("/project use home", { thread: 700 });
+  assert.match(h.texts(h.inThread(700)).at(-1)!, /New chats will use <b>home<\/b>[\s\S]*stays in <b>other<\/b>/);
+  assert.equal(h.app.threads.get(`${OWNER}:700`)!.cwd, h.other);
+  await h.send("next", { thread: 701 });
+  await waitFor(() => h.factory.created.length === 2, 1000, "second process");
+  assert.equal(h.factory.last().spec.cwd, h.home);
 });
 
-test("tab commands: wrong-scope redirect, passthrough with menu-name mapping, settings per tab", async () => {
+test("a chat the user named keeps its name; an unnamed one is titled from the first prompt", async () => {
   const h = harness();
-  await h.send("/new");
-  const tab = 500;
-  await h.send("/projects", { thread: tab });
-  assert.match(h.texts(h.inThread(tab)).at(-1)!, /works in the main view/);
+  const created = (thread: number, name: string, implicit: boolean) =>
+    h.send("", { thread, extra: { text: undefined, forum_topic_created: { name, icon_color: 0, is_name_implicit: implicit } } });
+  await created(800, "Release prep", false);
+  assert.equal(h.app.threads.get(`${OWNER}:800`), undefined, "nothing recorded until the chat is used");
+  await h.send("check the changelog", { thread: 800 });
+  assert.equal(h.app.threads.get(`${OWNER}:800`)!.title, "Release prep");
+  await created(801, "New chat", true);
+  await h.send("write tests", { thread: 801 });
+  await waitFor(() => h.calls.some((c) => c.method === "editForumTopic" && c.payload.name === "write tests"), 1000, "auto title");
+  assert.equal(h.calls.some((c) => c.method === "editForumTopic" && c.payload.message_thread_id === 800), false);
+});
 
-  await h.send("/code_review src/", { thread: tab });
+test("Claude commands pass through with menu-name mapping; per-chat settings apply live", async () => {
+  const h = harness();
+  await h.send("/code_review src/", { thread: 500 });
   await waitFor(() => h.factory.created.length === 1 && h.factory.last().sent.length === 1, 1000, "passthrough");
   assert.equal(h.factory.last().sent[0], "/code-review src/");
-
-  await h.send("/model opus", { thread: tab });
-  assert.equal(h.app.threads.get(`${OWNER}:${tab}`)!.model, "opus");
+  await h.send("/model opus", { thread: 500 });
+  assert.equal(h.app.threads.get(`${OWNER}:500`)!.model, "opus");
   await waitFor(() => h.factory.last().model === "opus", 500, "model applied live");
 });
 
-test("a deleted tab is detected on send and reported in the main view", async () => {
+test("settings set before the first message shape the session", async () => {
   const h = harness();
-  await h.send("/new");
-  const tab = 500;
-  h.goneThreads.add(tab);
-  await h.send("anyone there?", { thread: tab });
-  await waitFor(() => h.texts(h.inThread(undefined)).some((t) => t.includes("no longer exists")), 1000, "gone notice");
-  assert.equal(h.app.threads.get(`${OWNER}:${tab}`), undefined);
+  await h.send("/mode plan", { thread: 510 });
+  await h.send("/effort high", { thread: 510 });
+  assert.equal(h.factory.created.length, 0, "no process for settings alone");
+  await h.send("go", { thread: 510 });
+  await waitFor(() => h.factory.created.length === 1, 1000, "process");
+  assert.equal(h.factory.last().spec.permissionMode, "plan");
+  assert.equal(h.factory.last().spec.effort, "high");
 });
 
-test("permission prompts become buttons in the tab and keep the session busy", async () => {
+test("a deleted chat is detected on send and forgotten without notices elsewhere", async () => {
+  const h = harness();
+  await h.send("first", { thread: 500 });
+  await waitFor(() => h.app.threads.get(`${OWNER}:500`)?.started === true, 1000, "started");
+  h.goneThreads.add(500);
+  await h.send("anyone there?", { thread: 500 });
+  await waitFor(() => h.app.threads.get(`${OWNER}:500`) === undefined, 1000, "forgotten");
+  assert.equal(h.texts(h.inThread(undefined)).length, 0, "nothing is sent outside chats");
+});
+
+test("permission prompts become buttons in the chat and keep the session busy", async () => {
   const h = harness();
   let decision: unknown;
   h.factory.onSend = (p) => {
@@ -224,37 +251,39 @@ test("permission prompts become buttons in the tab and keep the session busy", a
       });
     }, 1);
   };
-  await h.send("/new");
-  const tab = 500;
-  await h.send("clean up", { thread: tab });
-  await waitFor(() => h.texts(h.inThread(tab)).some((t) => t.includes("rm -rf build")), 1000, "prompt");
-  assert.equal(h.app.pool.state(`${OWNER}:${tab}`), "busy");
-  await h.press("p:1:a", tab);
+  await h.send("clean up", { thread: 500 });
+  await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("rm -rf build")), 1000, "prompt");
+  assert.equal(h.app.pool.state(`${OWNER}:500`), "busy");
+  await h.press("p:1:a", 500);
   await waitFor(() => decision !== undefined, 1000, "decision");
   assert.deepEqual(decision, { behavior: "allow" });
 });
 
-test("/settings changes defaults for new tabs only", async () => {
+test("/settings changes defaults for new chats only", async () => {
   const h = harness();
-  await h.send("/new");
-  await h.send("/settings");
-  await h.press("set:verbose");
-  await h.press("sdp:plan");
+  await h.send("hi", { thread: 500 });
+  await waitFor(() => h.app.threads.get(`${OWNER}:500`) !== undefined, 1000, "bound");
+  await h.send("/settings", { thread: 500 });
+  await h.press("set:verbose", 500);
+  await h.press("sdp:plan", 500);
   assert.equal(h.app.chats.get(OWNER)!.defaults.verbose, true);
   assert.equal(h.app.chats.get(OWNER)!.defaults.permissionMode, "plan");
-  assert.equal(h.app.threads.get(`${OWNER}:500`)!.permissionMode, "auto", "existing tab unchanged");
-  await h.send("/new");
+  assert.equal(h.app.threads.get(`${OWNER}:500`)!.permissionMode, "auto", "existing chat unchanged");
+  await h.send("x", { thread: 501 });
   assert.equal(h.app.threads.get(`${OWNER}:501`)!.permissionMode, "plan");
 });
 
-test("without Threaded Mode, /new explains how to enable it", async () => {
+test("without Threaded Mode, messages explain how to enable it", async () => {
   const h = harness({ hasTopics: false });
-  await h.send("/new");
-  assert.match(h.texts().at(-1)!, /Threaded Mode/);
-  assert.equal(h.calls.some((c) => c.method === "createForumTopic"), false);
+  await h.send("hello");
+  await h.send("/compact");
+  for (const t of h.texts()) assert.match(t, /Threaded Mode/);
+  await h.send("/status");
+  assert.match(h.texts().at(-1)!, /Threaded Mode OFF/);
+  assert.equal(h.factory.created.length, 0);
 });
 
-test("auto mode unavailable: the tab falls back to acceptEdits and says so", async () => {
+test("auto mode unavailable: the chat falls back to acceptEdits and says so", async () => {
   const h = harness();
   h.factory.onSend = (p) => {
     setTimeout(async () => {
@@ -262,7 +291,6 @@ test("auto mode unavailable: the tab falls back to acceptEdits and says so", asy
       await p.finishTurn("ok");
     }, 1);
   };
-  await h.send("/new");
   await h.send("hi", { thread: 500 });
   await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("Auto mode isn't available")), 1000, "fallback notice");
   assert.equal(h.app.threads.get(`${OWNER}:500`)!.permissionMode, "acceptEdits");

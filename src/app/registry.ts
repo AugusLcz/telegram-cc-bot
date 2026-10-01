@@ -1,14 +1,17 @@
 import type { Context } from "grammy";
 import type { Target, ThreadKey } from "../core/types.ts";
 
-/** Where a command is available: the main view, inside tabs, or both. */
-export type Scope = "main" | "thread" | "both";
-export type Place = "main" | "thread";
+/**
+ * "chat": acts on the session of the chat it is sent in (/stop, /model …).
+ * "bot":  bot-wide and mechanical (/projects, /settings …).
+ * Both kinds work in every chat; the group only structures /help.
+ */
+export type CommandGroup = "chat" | "bot";
 
 export interface CommandInput {
   ctx: Context;
   target: Target;
-  /** Set inside a tab. */
+  /** The chat (tab) the command was sent in; absent only outside tabs. */
   key?: ThreadKey;
   name: string;
   args: string;
@@ -16,68 +19,41 @@ export interface CommandInput {
 
 export interface CommandDef<A> {
   name: string;
-  scope: Scope;
+  group: CommandGroup;
   /** Shown in /help and the Telegram menu. */
   description: string;
   /** e.g. "<name> <path>"; shown in /help. */
   usage?: string;
+  /** Not listed in /help or the menu (aliases such as /start). */
+  hidden?: boolean;
   run(app: A, input: CommandInput): Promise<void>;
 }
 
-/**
- * Bot commands by name and place. The same name may have one definition for
- * the main view and another for tabs (e.g. /status).
- */
+/** Bot commands: handled mechanically, without Claude. Everything else goes to Claude Code. */
 export class CommandRegistry<A> {
-  private readonly byName = new Map<string, Partial<Record<Place, CommandDef<A>>>>();
-  private readonly order: CommandDef<A>[] = [];
+  private readonly defs = new Map<string, CommandDef<A>>();
 
   register(def: CommandDef<A>): this {
-    const slot = this.byName.get(def.name) ?? {};
-    const places: Place[] = def.scope === "both" ? ["main", "thread"] : [def.scope];
-    for (const place of places) {
-      if (slot[place]) throw new Error(`command /${def.name} registered twice for ${place}`);
-      slot[place] = def;
-    }
-    this.byName.set(def.name, slot);
-    this.order.push(def);
+    if (this.defs.has(def.name)) throw new Error(`command /${def.name} registered twice`);
+    this.defs.set(def.name, def);
     return this;
   }
 
-  resolve(name: string, place: Place): CommandDef<A> | undefined {
-    return this.byName.get(name)?.[place];
-  }
-
-  /** Where else the command exists, for "use this in …" redirects. */
-  otherPlace(name: string, place: Place): Place | undefined {
-    const slot = this.byName.get(name);
-    const other: Place = place === "main" ? "thread" : "main";
-    return slot?.[other] ? other : undefined;
-  }
-
-  has(name: string): boolean {
-    return this.byName.has(name);
+  get(name: string): CommandDef<A> | undefined {
+    return this.defs.get(name);
   }
 
   names(): Set<string> {
-    return new Set(this.byName.keys());
+    return new Set(this.defs.keys());
   }
 
-  /** Definitions available in a place, in registration order. */
-  list(place: Place): CommandDef<A>[] {
-    return this.order.filter((d) => d.scope === "both" || d.scope === place);
+  /** Listed commands, in registration order, optionally of one group. */
+  list(group?: CommandGroup): CommandDef<A>[] {
+    return [...this.defs.values()].filter((d) => !d.hidden && (!group || d.group === group));
   }
 
-  /** One menu entry per name (Telegram menus cannot differ per tab). */
   menu(): { command: string; description: string }[] {
-    const seen = new Set<string>();
-    const out: { command: string; description: string }[] = [];
-    for (const d of this.order) {
-      if (seen.has(d.name)) continue;
-      seen.add(d.name);
-      out.push({ command: d.name, description: d.description });
-    }
-    return out;
+    return this.list().map((d) => ({ command: d.name, description: d.description }));
   }
 }
 

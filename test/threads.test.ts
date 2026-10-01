@@ -15,7 +15,7 @@ import { titleFromPrompt } from "../src/telegram/topics.ts";
 import { FakeFactory } from "./helpers/fake-process.ts";
 
 class FakeTopics implements TopicGateway {
-  next = 100;
+  next = 900; // far from the chat IDs the tests bind by hand
   created: { chatId: number; threadId: number; name: string }[] = [];
   renamed: { target: Target; name: string }[] = [];
   removed: Target[] = [];
@@ -87,24 +87,25 @@ function setup() {
   return { root, web, api, store, chats, projects, factory, pool, topics, sessions, threads };
 }
 
-test("createTab binds a fresh session in the active project", async () => {
+test("bindTab binds a new chat to a fresh session in the active project", () => {
   const { threads, topics, web } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   assert.equal(tab.key, `${CHAT}:100`);
-  assert.equal(topics.created[0].name, "New session");
+  assert.equal(tab.created, true);
+  assert.equal(topics.created.length, 0, "the chat already exists in Telegram");
   assert.equal(tab.record.project, "home");
   assert.equal(tab.record.cwd, web);
   assert.equal(tab.record.started, false);
   assert.equal(tab.record.titleSource, "placeholder");
   assert.equal(tab.record.permissionMode, "auto");
-  const titled = await threads.createTab(CHAT, "Bug hunt");
+  const titled = threads.bindTab(CHAT, 101, "Bug hunt");
   assert.equal(titled.record.titleSource, "user");
   assert.notEqual(titled.record.sessionId, tab.record.sessionId);
 });
 
 test("new tabs follow the active project; existing tabs keep their cwd", async () => {
   const { threads, projects, api } = setup();
-  const first = await threads.createTab(CHAT);
+  const first = threads.bindTab(CHAT, 100);
   projects.add("api", api);
   projects.use(CHAT, "api");
   const plus = threads.bindTab(CHAT, 555, "From plus", false);
@@ -118,7 +119,7 @@ test("new tabs follow the active project; existing tabs keep their cwd", async (
 
 test("first send creates the session, later sends resume it with persisted settings", async () => {
   const { threads, factory, pool } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   await threads.send(tab.key, "hello", "hello");
   const p1 = factory.last();
   assert.equal(p1.spec.resume, false);
@@ -141,7 +142,7 @@ test("first send creates the session, later sends resume it with persisted setti
 
 test("auto-title on the first prompt; user titles are never overwritten", async () => {
   const { threads, topics, sessions, factory } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   await threads.send(tab.key, "Fix the flaky login test\nmore details", "Fix the flaky login test\nmore details");
   assert.equal(threads.get(tab.key)!.title, "Fix the flaky login test");
   assert.deepEqual(topics.renamed.map((r) => r.name), ["Fix the flaky login test"]);
@@ -149,7 +150,7 @@ test("auto-title on the first prompt; user titles are never overwritten", async 
   await threads.send(tab.key, "second prompt", "second prompt");
   assert.equal(topics.renamed.length, 1, "only the first prompt titles the tab");
 
-  const named = await threads.createTab(CHAT, "Mine");
+  const named = threads.bindTab(CHAT, 101, "Mine");
   await threads.send(named.key, "something", "something");
   assert.equal(threads.get(named.key)!.title, "Mine");
 
@@ -175,7 +176,7 @@ test("resumeIntoTab opens a new tab once and reuses it afterwards", async () => 
 
 test("forkTab needs a started session and opens the fork in a new tab", async () => {
   const { threads, factory } = setup();
-  const tab = await threads.createTab(CHAT, "Base");
+  const tab = threads.bindTab(CHAT, 100, "Base");
   await assert.rejects(threads.forkTab(tab.key), UserError);
   await threads.send(tab.key, "x");
   await factory.last().emit({ type: "system", subtype: "init", session_id: tab.record.sessionId });
@@ -188,7 +189,7 @@ test("forkTab needs a started session and opens the fork in a new tab", async ()
 
 test("a missing transcript falls back to a fresh session", async () => {
   const { threads, factory, store } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   store.update(() => {
     tab.record.started = true;
   });
@@ -202,7 +203,7 @@ test("a missing transcript falls back to a fresh session", async () => {
 
 test("conversation_reset rebinds the tab to the new session", async () => {
   const { threads, factory } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   await threads.send(tab.key, "/clear");
   await factory.last().emit({ type: "conversation_reset", new_conversation_id: "after-clear" });
   assert.equal(threads.get(tab.key)!.sessionId, "after-clear");
@@ -211,7 +212,7 @@ test("conversation_reset rebinds the tab to the new session", async () => {
 
 test("deleteTab hibernates, removes the topic and forgets the tab", async () => {
   const { threads, factory, topics, pool } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   await threads.send(tab.key, "x");
   await threads.deleteTab(tab.key);
   assert.ok(factory.last().closed);
@@ -236,8 +237,38 @@ test("projects: validation, removal and the active project", () => {
 
 test("mode changes made by Claude itself are persisted for the next resume", async () => {
   const { threads, factory } = setup();
-  const tab = await threads.createTab(CHAT);
+  const tab = threads.bindTab(CHAT, 100);
   await threads.send(tab.key, "plan it");
   await factory.last().emit({ type: "system", subtype: "status", status: null, permissionMode: "default" });
   assert.equal(threads.get(tab.key)!.permissionMode, "default");
+});
+
+test("a chat can switch project only until its session starts", async () => {
+  const { threads, projects, factory, api } = setup();
+  const other = projects.add("api", api);
+  const tab = threads.bindTab(CHAT, 100);
+  assert.equal(threads.setProject(tab.key, other), true);
+  assert.equal(threads.get(tab.key)!.cwd, api);
+  await threads.send(tab.key, "go");
+  await factory.last().emit({ type: "system", subtype: "init", session_id: tab.record.sessionId });
+  assert.equal(threads.setProject(tab.key, projects.get("home")!), false, "started sessions keep their directory");
+  assert.equal(threads.get(tab.key)!.cwd, api);
+  assert.equal(threads.setProject(`${CHAT}:555`, other), true, "unknown chats bind to the active project later");
+});
+
+test("pruneEmpty forgets only old chats that never started a session", async () => {
+  const { threads, factory, store } = setup();
+  const empty = threads.bindTab(CHAT, 100);
+  const fresh = threads.bindTab(CHAT, 101);
+  const used = threads.bindTab(CHAT, 102);
+  await threads.send(used.key, "x");
+  await factory.last().emit({ type: "system", subtype: "init", session_id: used.record.sessionId });
+  store.update(() => {
+    empty.record.lastActiveAt = 0;
+    used.record.lastActiveAt = 0;
+  });
+  assert.equal(threads.pruneEmpty(60_000), 1);
+  assert.equal(threads.get(empty.key), undefined);
+  assert.ok(threads.get(fresh.key), "recent empty chats stay");
+  assert.ok(threads.get(used.key), "chats with a session stay");
 });

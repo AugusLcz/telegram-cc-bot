@@ -1,10 +1,10 @@
 import type { Context } from "grammy";
 import { threadKey, type Target, type ThreadKey } from "../core/types.ts";
 
-/** The "General" topic of a chat with topics; it is the main view and is addressed without a thread ID. */
+/** The "General" topic: not a session chat; addressed without a thread ID. */
 export const GENERAL_THREAD_ID = 1;
 
-/** `message_thread_id` parameter for a target (omitted for the main view). */
+/** `message_thread_id` parameter for a target (omitted outside chats). */
 export function threadParams(t: Target): { message_thread_id?: number } {
   return t.threadId && t.threadId !== GENERAL_THREAD_ID ? { message_thread_id: t.threadId } : {};
 }
@@ -27,7 +27,7 @@ export function keyOf(t: Target): ThreadKey | undefined {
   return t.threadId === undefined ? undefined : threadKey(t.chatId, t.threadId);
 }
 
-/** Ordering key for update processing: per tab, or per chat's main view. */
+/** Ordering key for update processing: per chat (topic), or per bot root outside chats. */
 export function sequenceKey(ctx: Context): string | undefined {
   const t = targetOf(ctx);
   return t ? `${t.chatId}:${t.threadId ?? "main"}` : undefined;
