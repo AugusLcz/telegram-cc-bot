@@ -3,18 +3,25 @@
 #
 #   sudo ./deploy/deploy.sh [command] [options]
 #
+# Prerequisites (once, as the account that will run the bot; usually your own):
+#   1. Claude Code installed:   curl -fsSL https://claude.ai/install.sh | bash
+#   2. Signed in:               claude   (then /login; over SSH open the link anywhere, paste the code back)
+#      or headless:             claude setup-token, then pass CLAUDE_CODE_OAUTH_TOKEN=<token> to this script
+#   3. A Telegram bot token with Threaded Mode enabled in @BotFather
+# The script checks these first and stops with instructions if one is missing.
+#
 # Commands
-#   install     (default) Install or upgrade, configure, sign in, start, then verify
+#   install     (default) Check prerequisites, install or upgrade, configure, start, then verify
 #   check       Read-only health check of an existing deployment
 #   update      Copy code from this checkout, reinstall dependencies, restart, verify
-#   login       Sign the service user in to Claude (browser login or long-lived token)
-#   claude ...  Run the bundled Claude Code as the service user (e.g. `claude mcp list`)
+#   claude ...  Run Claude Code as the service user (e.g. `claude mcp list`)
 #   status      Service status and recent logs
 #   logs        Follow the service logs
 #   uninstall   Stop and remove the service (--purge also deletes the install directory)
 #
 # Options
-#   --user NAME      Service user                  (default: claude)
+#   --user NAME      Account that runs the bot     (default: the account that ran sudo,
+#                                                  or the one an existing install uses)
 #   --dir PATH       Install directory             (default: /opt/tg-cc-bot)
 #   --service NAME   systemd unit name             (default: tg-cc-bot)
 #   -y, --yes        Never prompt; take settings from the environment
@@ -37,7 +44,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 
 CMD=install
-SVC_USER=claude
+SVC_USER=''
+CLAUDE_CLI=''
 INSTALL_DIR=/opt/tg-cc-bot
 SERVICE=tg-cc-bot
 ASSUME_YES=0
@@ -513,7 +521,7 @@ check_claude_auth() {
     local text
     text=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_BIN" auth status --text 2>&1 || true)
     if grep -qi expired <<<"$text"; then bad "Claude login expired"; else bad "Not signed in to Claude"; fi
-    hint "Run: sudo $0 login"
+    hint "Sign in again as $SVC_USER: sudo -iu $SVC_USER claude, then /login (or set CLAUDE_CODE_OAUTH_TOKEN)"
     return 0
   fi
 
@@ -539,7 +547,7 @@ live_probe() {
     msg=$(json_str "$out" result)
     bad "Live test failed: ${msg:-${out:0:300}}"
     case "$msg $out" in
-      *xpired* | *uthenticat* | *login* | *401*) hint "Sign in again: sudo $0 login" ;;
+      *xpired* | *uthenticat* | *login* | *401*) hint "Sign in again as $SVC_USER: sudo -iu $SVC_USER claude, then /login" ;;
       *limit* | *usage*) hint "Your plan's usage limit may be reached; try again later" ;;
       *) hint "Run it by hand: sudo $0 claude -p hello" ;;
     esac
@@ -685,15 +693,74 @@ step_preflight() {
   ok "Network: Telegram, Anthropic, bun.sh and npm reachable"
 }
 
-step_user() {
-  section "Service user"
-  if getent passwd "$SVC_USER" >/dev/null; then
-    ok "User '$SVC_USER' exists"
-  else
-    useradd --create-home --shell /bin/bash "$SVC_USER"
-    ok "Created user '$SVC_USER'"
+# The service user's own Claude Code install (any install method), if any.
+find_user_claude() {
+  local p
+  for p in "$SVC_HOME/.local/bin/claude" "$SVC_HOME/.claude/local/claude" "$SVC_HOME/.npm-global/bin/claude"; do
+    if [[ -x $p ]]; then printf '%s' "$p"; return 0; fi
+  done
+  p=$(AS_USER_TIMEOUT=15 as_user bash -lc 'command -v claude' 2>/dev/null | tail -n1 || true)
+  if [[ $p == /* && -x $p ]]; then printf '%s' "$p"; fi
+}
+
+# Is the service user signed in to Claude (with the given claude binary)?
+SIGNIN_METHOD=''
+user_signed_in() {
+  local out rc=0
+  out=$(AS_USER_TIMEOUT=30 as_user "$1" auth status 2>&1) || rc=$?
+  if ((rc == 0)); then
+    SIGNIN_METHOD=$(json_str "$out" authMethod)
+    return 0
   fi
+  # Older Claude Code without `auth status`: accept a stored login or a token; the live test decides.
+  if grep -qiE "unknown (command|option)|did you mean" <<<"$out"; then
+    if [[ -n ${CLAUDE_CODE_OAUTH_TOKEN:-} || -s $SVC_HOME/.claude/.credentials.json ]]; then
+      SIGNIN_METHOD=stored
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Stop with the exact steps to satisfy the Claude prerequisite.
+prereq_fail() {
+  bad "$1"
+  local as=""
+  if [[ $SVC_USER != "${SUDO_USER:-}" ]]; then as="sudo -iu $SVC_USER    # switch to the account that runs the bot\n     "; fi
+  printf '\n  %sDo this once, then run the script again:%s\n' "$BOLD" "$RESET"
+  printf "     ${as}curl -fsSL https://claude.ai/install.sh | bash    # skip if claude is installed\n"
+  printf '     claude          # sign in with /login (over SSH: open the link on any device, paste the code back)\n'
+  printf '\n  %sHeadless alternative:%s run `claude setup-token` anywhere, then\n' "$BOLD" "$RESET"
+  printf '     sudo CLAUDE_CODE_OAUTH_TOKEN=<token> bash %s\n\n' "$SCRIPT_DIR/deploy.sh"
+  exit 1
+}
+
+step_prerequisites() {
+  section "Prerequisites"
   resolve_paths
+  if [[ -z $SVC_HOME ]]; then
+    die "Account '$SVC_USER' does not exist. Create it, install Claude Code and sign in as it, or run this script with sudo from your own account."
+  fi
+  ok "Bot runs as '$SVC_USER' (home $SVC_HOME)"
+  if [[ $SVC_USER == root ]]; then warn "Running Claude Code as root gives it full control of this machine; prefer a normal account (--user)"; fi
+
+  CLAUDE_CLI=$(find_user_claude)
+  [[ -n $CLAUDE_CLI ]] || prereq_fail "Claude Code is not installed for '$SVC_USER'"
+  local v
+  v=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_CLI" --version 2>/dev/null | head -n1 || true)
+  [[ -n $v ]] || prereq_fail "Claude Code at $CLAUDE_CLI does not run for '$SVC_USER'"
+  ok "Claude Code $v ($CLAUDE_CLI)"
+
+  # A token handed in through the environment counts as signed in (it is saved to .env later).
+  if [[ -n ${FROM_ENV[CLAUDE_CODE_OAUTH_TOKEN]:-} ]]; then export CLAUDE_CODE_OAUTH_TOKEN=${FROM_ENV[CLAUDE_CODE_OAUTH_TOKEN]}; fi
+  if user_signed_in "$CLAUDE_CLI"; then
+    ok "Signed in to Claude${SIGNIN_METHOD:+ ($SIGNIN_METHOD)}; the bot shares this login"
+  else
+    local text
+    text=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_CLI" auth status --text 2>&1 || true)
+    if grep -qi expired <<<"$text"; then prereq_fail "The Claude login of '$SVC_USER' has expired"; fi
+    prereq_fail "'$SVC_USER' is not signed in to Claude"
+  fi
 }
 
 step_bun() {
@@ -852,48 +919,6 @@ step_config() {
   resolve_paths
 }
 
-signed_in() { AS_USER_TIMEOUT=30 as_user "$CLAUDE_BIN" auth status >/dev/null 2>&1; }
-
-step_login() {
-  section "Claude sign-in"
-  resolve_paths
-  [[ -n $CLAUDE_BIN ]] || die "Claude Code binary not found; run install first"
-  if [[ $CMD != login ]] && signed_in; then
-    ok "Already signed in"
-    return 0
-  fi
-  if ! is_interactive; then
-    bad "Not signed in to Claude, and running non-interactively"
-    hint "Export CLAUDE_CODE_OAUTH_TOKEN (from \`claude setup-token\`) or run: sudo $0 login"
-    return 0
-  fi
-  printf '\n  Sign %s in to your Claude subscription:\n' "$SVC_USER"
-  printf '    1) Browser login (recommended): open the link on any device, paste the code back here\n'
-  printf '    2) Long-lived token: run setup-token, paste the token (stored in .env, valid for 1 year)\n'
-  printf '    3) Skip for now\n'
-  local choice
-  ask choice "Choice" 1
-  case $choice in
-    1)
-      as_user "$CLAUDE_BIN" auth login </dev/tty >/dev/tty 2>&1 || true
-      ;;
-    2)
-      as_user "$CLAUDE_BIN" setup-token </dev/tty >/dev/tty 2>&1 || true
-      local token
-      ask token "Paste the token printed above" "" secret
-      [[ -n $token ]] || die "No token entered"
-      if [[ $token != sk-ant-* ]]; then warn "Token does not start with sk-ant-; saving it anyway"; fi
-      env_set CLAUDE_CODE_OAUTH_TOKEN "$token"
-      export CLAUDE_CODE_OAUTH_TOKEN=$token
-      ;;
-    *)
-      warn "Skipped. The bot will report authentication errors until you run: sudo $0 login"
-      return 0
-      ;;
-  esac
-  if signed_in; then ok "Signed in"; else bad "Still not signed in"; hint "Retry: sudo $0 login"; fi
-}
-
 step_service() {
   section "systemd service"
   local path="$SVC_HOME/.bun/bin:$SVC_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -984,12 +1009,11 @@ cmd_install() {
   printf '%sInstalling tg-cc-bot%s → %s (user %s, service %s)\n' "$BOLD" "$RESET" "$INSTALL_DIR" "$SVC_USER" "$SERVICE"
   resolve_paths
   step_preflight
-  step_user
+  step_prerequisites
   stop_service_if_running
   step_bun
   step_code
   step_config
-  step_login
   step_service
   self_check
 }
@@ -1009,16 +1033,6 @@ cmd_check() {
   printf '%sChecking tg-cc-bot%s in %s (user %s, service %s)\n' "$BOLD" "$RESET" "$INSTALL_DIR" "$SVC_USER" "$SERVICE"
   run_all_checks
   summary
-}
-
-cmd_login() {
-  resolve_paths
-  [[ -n $SVC_HOME ]] || die "User $SVC_USER does not exist; run install first"
-  step_login
-  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
-    systemctl restart "$SERVICE"
-    info "Restarted $SERVICE to pick up the new credentials"
-  fi
 }
 
 cmd_claude() {
@@ -1052,14 +1066,14 @@ cmd_uninstall() {
   else
     info "Kept $INSTALL_DIR (add --purge to delete it)"
   fi
-  info "Kept user $SVC_USER and ~$SVC_USER/.claude (sign-in and sessions). Remove with: userdel -r $SVC_USER"
+  info "Kept $SVC_USER's Claude Code install, sign-in and sessions (~$SVC_USER/.claude)"
 }
 
 main() {
   local -a original=("$@")
   while (($#)); do
     case $1 in
-      install | check | update | login | status | logs | uninstall) CMD=$1 ;;
+      install | check | update | status | logs | uninstall) CMD=$1 ;;
       claude) CMD=claude; shift; PASSTHROUGH=("$@"); break ;;
       --user) SVC_USER=${2:?--user needs a value}; shift ;;
       --dir) INSTALL_DIR=${2:?--dir needs a value}; shift ;;
@@ -1091,11 +1105,17 @@ main() {
   trap 'on_error $LINENO "$BASH_COMMAND"' ERR
   ENV_FILE=$INSTALL_DIR/.env
 
+  # Which account runs the bot: --user, else the one an existing install uses, else whoever ran sudo.
+  if [[ -z $SVC_USER && -f /etc/systemd/system/$SERVICE.service ]]; then
+    SVC_USER=$(sed -n 's/^User=//p' "/etc/systemd/system/$SERVICE.service" | head -n1)
+  fi
+  SVC_USER=${SVC_USER:-${SUDO_USER:-}}
+  [[ -n $SVC_USER ]] || die "Run this with sudo from the account that has Claude Code signed in, or pass --user NAME"
+
   case $CMD in
     install) cmd_install ;;
     update) cmd_update ;;
     check) cmd_check ;;
-    login) cmd_login ;;
     claude) cmd_claude ;;
     status) cmd_status ;;
     logs) cmd_logs ;;

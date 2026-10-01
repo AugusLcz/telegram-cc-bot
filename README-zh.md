@@ -85,31 +85,50 @@ Telegram 菜单名只允许 `[a-z0-9_]`，所以 `code-review` 在菜单里显�
 - **无人响应的提示**在 `PERMISSION_TIMEOUT_MS`（默认 10 分钟）后自动拒绝。
 - **`bypassPermissions`**（通过 `/mode` 或 `/settings`）让 Claude 不经询问执行任何操作，只在你愿意让 Claude 随意改动的机器上用。
 - **项目目录**可以用 `ALLOWED_ROOTS` 限制在指定目录下。
-- Claude Code 以服务用户身份运行，拥有该用户的文件权限。请用专用账户，不要用 root。
+- Claude Code 以运行 bot 的那个账户身份运行，拥有该账户的文件权限。不要用 root；想隔离的话，用一个专用账户（见[前提条件](#前提条件)）。
+
+## 前提条件
+
+无论是本地运行还是部署到服务器，都请先**用将来运行 bot 的那个账户**（通常就是你自己的账户，见本节最后的说明）完成以下几项：
+
+1. **Claude Pro 或 Max 订阅。**
+2. **安装 Claude Code 并登录。**
+   ```bash
+   curl -fsSL https://claude.ai/install.sh | bash   # 适用于 Linux、macOS、WSL；其它平台见 Claude Code 文档
+   claude                                           # 然后输入 /login
+   ```
+   通过 SSH 登录服务器时没有浏览器：在任意设备上打开 Claude Code 给出的链接完成登录，再把验证码贴回终端。用下面的命令确认登录成功：
+   ```bash
+   claude auth status    # 输出里有 "loggedIn": true
+   ```
+   没有浏览器时的替代办法：在任意一台有浏览器的机器上运行 `claude setup-token`，把得到的 token 作为 `CLAUDE_CODE_OAUTH_TOKEN` 交给 bot（写进 `.env`，或者用 `sudo CLAUDE_CODE_OAUTH_TOKEN=<token> bash deploy/deploy.sh` 部署）。token 有效期一年。
+3. **开启了话题模式的 Telegram bot。** 在 [@BotFather](https://t.me/BotFather) 用 `/newbot` 创建 bot 并复制 token。然后在 BotFather 里打开这个 bot → **Bot Settings → Threaded Mode**，开启话题模式，并允许用户创建话题（新建对话靠它）。用 [@userinfobot](https://t.me/userinfobot) 查到你自己的数字 user ID。
+4. **运行环境。** 部署到服务器：需要带 systemd 的 Linux（x64/arm64）和 `sudo` 权限，Bun 由部署脚本自动安装。本地运行：需要 [Bun](https://bun.sh) 或 Node.js 24。
+
+bot 会以完成第 2 步的那个账户运行，并共用它的 Claude 登录、skills、设置和会话记录。想和自己的账户分开的话，先建一个专用账户，用 `sudo -iu <账户名>` 切过去完成第 2 步，部署时加上 `--user <账户名>`。
 
 ## 部署（Linux）
 
-先在 [@BotFather](https://t.me/BotFather) `/newbot` 拿到 bot token，并在 bot → **Bot Settings → Threaded Mode** 里开启话题模式，同时允许用户创建话题（新建对话靠它）。然后在服务器上一条命令完成安装、配置、登录、启动和自查：
+先完成上面的[前提条件](#前提条件)。然后在将来运行 bot 的那个账户下，一条命令完成配置、启动和自查：
 
 ```bash
-git clone <本仓库> tg-cc-bot && cd tg-cc-bot
+git clone https://github.com/AugusLcz/telegram-cc-bot.git tg-cc-bot && cd tg-cc-bot
 sudo bash deploy/deploy.sh
 ```
 
 脚本依次执行以下步骤，可以随时重复运行：
 
 1. **预检**：确认是 Linux x64/arm64 且有 systemd；缺 `curl`、`unzip`、`git` 就自动安装；检查 Telegram、Anthropic、bun.sh 和 npm 能否连通。
-2. **服务用户**：没有 `claude` 用户就创建。
-3. **Bun**：为该用户安装；已有且版本够新就跳过。
-4. **应用**：把代码复制到 `/opt/tg-cc-bot` 并安装依赖，Agent SDK 会带上对应版本的 Claude Code。
+2. **检查前提条件**：确认这个账户已经安装并登录了 Claude Code。没有的话立即停下，打印出需要执行的命令；脚本不会自己创建账户，也不会自己执行登录。
+3. **Bun**：为这个账户安装；已有且版本够新就跳过。
+4. **应用**：把代码复制到 `/opt/tg-cc-bot` 并安装依赖。Agent SDK 会带上与自身版本匹配的 Claude Code，直接使用这个账户已有的登录。
 5. **配置**：
    - 生成权限为 600 的 `.env`。
    - 询问 bot token，并用 Telegram 接口验证；话题模式没开会提醒你。
    - 询问 user ID：可以直接填；也可以留空，然后给 bot 发一条消息，脚本会自动识别。
    - 询问第一个项目的目录。
-6. **Claude 登录**：可选浏览器登录，或者用 `setup-token` 生成长期 token；已登录则跳过。
-7. **服务**：生成并启用 systemd unit，启动后一直等到日志里出现 polling 和 "Claude Code ready"。
-8. **自查**：完整跑一遍下面的健康检查，并输出汇总。
+6. **服务**：生成并启用 systemd unit，启动后一直等到日志里出现 polling 和 "Claude Code ready"。
+7. **自查**：完整跑一遍下面的健康检查（包括一次真实的 Claude 请求），并输出汇总。
 
 日常命令：
 
@@ -117,13 +136,12 @@ sudo bash deploy/deploy.sh
 |---|---|
 | `sudo bash deploy/deploy.sh check` | 只读的全面自查 |
 | `sudo bash deploy/deploy.sh update` | `git pull` 之后用：复制新代码、重装依赖、重启并自查 |
-| `sudo bash deploy/deploy.sh login` | 重新登录（登录过期、换账号、改用长期 token） |
-| `sudo bash deploy/deploy.sh claude …` | 以服务用户身份运行 Claude Code，比如 `claude mcp add …`、`claude plugin install …`，或者直接 `claude` 打开终端界面 |
+| `sudo bash deploy/deploy.sh claude …` | 以运行 bot 的账户身份运行 Claude Code，比如 `claude mcp add …`、`claude plugin install …`，或者直接 `claude` 打开终端界面 |
 | `sudo bash deploy/deploy.sh status` / `logs` | 查看服务状态和最近日志 / 实时跟踪日志 |
 | `sudo bash deploy/deploy.sh uninstall [--purge]` | 移除服务（`--purge` 同时删掉 `/opt/tg-cc-bot`） |
 
 **参数：**
-- `--user`、`--dir`、`--service`：修改默认的用户、目录和服务名（`claude`、`/opt/tg-cc-bot`、`tg-cc-bot`）。
+- `--user`：运行 bot 的账户（默认是执行 `sudo` 的账户，已安装过的话沿用原来的账户）；`--dir`、`--service`：修改目录和服务名（默认 `/opt/tg-cc-bot`、`tg-cc-bot`）。
 - `--reconfigure`：重新填写配置。
 - `--no-live`：跳过实际调用 Claude 的测试。
 - 无人值守安装：先 export `TELEGRAM_BOT_TOKEN`、`ALLOWED_USER_IDS`、`CLAUDE_CODE_OAUTH_TOKEN`，再运行 `sudo -E bash deploy/deploy.sh install --yes`。
@@ -131,7 +149,7 @@ sudo bash deploy/deploy.sh
 **`check` 检查的内容：**
 - **系统**：系统版本、CPU 架构、libc、systemd、内存、磁盘、必需工具。
 - **网络**：Telegram、Anthropic、claude.ai 能否连通。
-- **服务用户**和 **Bun** 版本。
+- **运行 bot 的账户**和 **Bun** 版本。
 - **应用**：
   - 代码目录的所有者、依赖版本
   - 模块能否在 Bun 下正常加载
@@ -139,7 +157,7 @@ sudo bash deploy/deploy.sh
 - **配置**：
   - `.env` 的文件权限
   - bot token 和 user ID 的格式
-  - 第一个项目目录对服务用户是否可写
+  - 第一个项目目录对这个账户是否可写
   - 各项模式、effort、日志级别、状态文件目录
   - 进程数上限，以及它和机器内存是否匹配
 - **Telegram**：`getMe` 是否接受 token，话题模式是否开启，用户能否自己新建对话，有没有设置 webhook。
@@ -187,7 +205,8 @@ sudo bash deploy/deploy.sh
 | 不确定哪里有问题 | 先跑 `sudo bash deploy/deploy.sh check`，每个 ✗ 都附有修复提示 |
 | bot 提示 Threaded Mode 没开 | 在 @BotFather → 你的 bot → Bot Settings 里开启 **Threaded Mode**，然后重启 bot |
 | 在主屏幕打字不会新建对话 | 在 @BotFather 的 Threaded Mode 设置里允许用户创建话题 |
-| 回复 `Failed to authenticate: OAuth session expired` | 服务用户的登录过期了，运行 `sudo bash deploy/deploy.sh login` |
+| 回复 `Failed to authenticate: OAuth session expired` | 运行 bot 的账户登录过期了。用这个账户运行 `claude` 再输入 `/login`（不需要重启 bot） |
+| 部署停在 "Prerequisites" | 这个账户还没安装或没登录 Claude Code。按脚本打印的命令做完，再重新运行脚本 |
 | 出现 "⏳ waiting for a free slot" | `MAX_LIVE_SESSIONS` 个进程都在忙。等一下、在别的对话里用 `/stop`，或调高上限 |
 | 提示 "Auto mode isn't available…" | 部分账户或模型会这样。该对话已改为 `acceptEdits`，可以用 `/mode` 换成别的 |
 | 误删了一个对话 | 会话还保存在磁盘上，用 `/resume` 重新打开 |

@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Deployment: installing Claude Code and signing in is now a prerequisite, done once by the user
+  as the account that runs the bot (by default the account that ran `sudo`). `deploy.sh` checks it
+  first and stops with the exact commands to run instead of creating a `claude` account and running
+  an interactive login, which could hang over SSH. The bot shares that account's Claude login,
+  skills and settings; `--user` selects a dedicated account.
+
+### Removed
+
+- `deploy.sh login` (sign in with `claude` → `/login` as the bot's account instead).
+
+### Documentation
+
+- New "Prerequisites" section in both READMEs: subscription, Claude Code install and sign-in
+  (including over SSH and with `setup-token`), Telegram bot with Threaded Mode, runtime.
+
 ## [0.1.0] - 2026-10-01
 
 First release.
@@ -29,4 +48,5 @@ First release.
   real Bot API spike script (`scripts/topics-spike.ts`).
 - Architecture document, English and Chinese READMEs, 66 tests.
 
-[0.1.0]: https://github.com/AugusLcz/Telegram-cc-bot/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/AugusLcz/telegram-cc-bot/releases/tag/v0.1.0

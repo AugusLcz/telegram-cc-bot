@@ -16,6 +16,7 @@ tg-cc-bot is a thin Telegram front end for real, unmodified Claude Code processe
 - [Commands](#commands)
 - [Sessions and processes](#sessions-and-processes)
 - [Permissions and safety](#permissions-and-safety)
+- [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Deploying on a Linux server](#deploying-on-a-linux-server)
 - [Configuration](#configuration)
@@ -111,47 +112,64 @@ The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **Unanswered prompts** are denied after `PERMISSION_TIMEOUT_MS` (default 10 minutes).
 - **`bypassPermissions`** (via `/mode` or `/settings`) lets Claude run anything without asking. Use it only on a machine you're willing to let Claude change freely.
 - **Projects** can be restricted to directories under `ALLOWED_ROOTS`.
-- Claude Code runs as the service user with that user's filesystem access. Run it as a dedicated account, not root.
+- Claude Code runs as the bot's account, with that account's file access. Don't use root; for isolation use a dedicated account (see [Prerequisites](#prerequisites)).
+
+## Prerequisites
+
+Do these once, **as the account that will run the bot** (usually your own; see the note below), before running it locally or deploying it.
+
+1. **A Claude Pro or Max subscription.**
+2. **Claude Code installed and signed in.**
+   ```bash
+   curl -fsSL https://claude.ai/install.sh | bash   # Linux, macOS, WSL; other platforms: see the Claude Code docs
+   claude                                           # then type /login
+   ```
+   Over SSH there is no browser: open the link Claude Code prints on any device, sign in, and paste the code back into the terminal. Confirm it worked:
+   ```bash
+   claude auth status    # shows "loggedIn": true
+   ```
+   Headless alternative: run `claude setup-token` on any machine with a browser and give the bot the token as `CLAUDE_CODE_OAUTH_TOKEN` (in `.env`, or `sudo CLAUDE_CODE_OAUTH_TOKEN=<token> bash deploy/deploy.sh`). The token is valid for a year.
+3. **A Telegram bot with Threaded Mode.** Create it with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy the token. In BotFather, open the bot → **Bot Settings → Threaded Mode**, enable it, and allow users to create topics (that is how you open new chats). Get your numeric user ID from [@userinfobot](https://t.me/userinfobot).
+4. **Runtime.** For a server deployment: Linux x64/arm64 with systemd and `sudo` (the deploy script installs Bun). To run it locally: [Bun](https://bun.sh) or Node.js 24.
+
+The bot runs as the account from step 2 and shares that account's Claude login, skills, settings and session history. To keep it apart from your own account, create a dedicated account, do step 2 as that account (`sudo -iu <name>`), and deploy with `--user <name>`.
 
 ## Quick start
 
-Requirements: [Bun](https://bun.sh) (or Node.js 24), a Telegram account, and a Claude Pro or Max subscription.
+With the [prerequisites](#prerequisites) done:
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy the token. In BotFather, open the bot → **Bot Settings → Threaded Mode**, enable it, and allow users to create topics (that is how you open new chats). Get your numeric user ID from [@userinfobot](https://t.me/userinfobot).
-2. Install and configure:
+1. Install and configure:
    ```bash
    bun install
    cp .env.example .env    # set TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, DEFAULT_CWD (first project)
    ```
-3. Sign in to Claude Code once as the same OS user: run `claude`, then `/login` (see [Authentication](#authentication-and-billing)).
-4. Optional: check that chats (topics) work for your bot: `CHAT_ID=<your id> bun scripts/topics-spike.ts`.
-5. Run it, then send `/help` to your bot:
+2. Optional: check that chats (topics) work for your bot: `CHAT_ID=<your id> bun scripts/topics-spike.ts`.
+3. Run it, then send `/help` to your bot:
    ```bash
    bun src/index.ts
    ```
 
 ## Deploying on a Linux server
 
-One command installs, configures, signs in, starts and verifies everything:
+Complete the [prerequisites](#prerequisites) first. Then, from the account that will run the bot, one command configures, starts and verifies everything:
 
 ```bash
-git clone <this repo> tg-cc-bot && cd tg-cc-bot
+git clone https://github.com/AugusLcz/telegram-cc-bot.git tg-cc-bot && cd tg-cc-bot
 sudo bash deploy/deploy.sh
 ```
 
 It runs these steps, and is safe to re-run at any time:
 
 1. **Preflight.** Linux x64/arm64 with systemd. Installs `curl`, `unzip` and `git` if missing, and checks that Telegram, Anthropic, bun.sh and npm are reachable.
-2. **Service user.** Creates the `claude` account if it doesn't exist.
-3. **Bun.** Installs Bun for that user, or keeps an existing one that is recent enough.
-4. **Application.** Copies the code to `/opt/tg-cc-bot` and installs dependencies. The Agent SDK brings a matching Claude Code binary.
+2. **Prerequisites.** Checks that Claude Code is installed and signed in for the account (see [Prerequisites](#prerequisites)). If not, it stops right away and prints the exact commands to run; it never creates accounts or runs a login itself.
+3. **Bun.** Installs Bun for that account, or keeps an existing one that is recent enough.
+4. **Application.** Copies the code to `/opt/tg-cc-bot` and installs dependencies. The Agent SDK brings a Claude Code binary matching its version, which uses the account's existing login.
 5. **Configuration.** Creates `.env` (mode 600) and asks for:
    - the bot token, which it validates with Telegram (it also warns if Threaded Mode is off);
    - your user ID: type it, or leave it empty, message the bot, and the script detects it;
    - the first project's directory.
-6. **Claude sign-in.** Offers browser login or a long-lived `setup-token`, and skips this if you're already signed in.
-7. **Service.** Generates and enables the systemd unit, starts it, and waits until the bot reports it is polling and Claude Code is ready.
-8. **Self-check.** Runs the full health check below and prints a summary.
+6. **Service.** Generates and enables the systemd unit, starts it, and waits until the bot reports it is polling and Claude Code is ready.
+7. **Self-check.** Runs the full health check below, including a live Claude request, and prints a summary.
 
 Day-2 commands:
 
@@ -159,12 +177,11 @@ Day-2 commands:
 |---|---|
 | `sudo bash deploy/deploy.sh check` | Read-only health check of the whole deployment (see below) |
 | `sudo bash deploy/deploy.sh update` | After `git pull`: copy the new code, reinstall dependencies, restart, verify |
-| `sudo bash deploy/deploy.sh login` | Sign in again (expired login, switch account, or set a long-lived token) |
 | `sudo bash deploy/deploy.sh claude …` | Run Claude Code as the service user, e.g. `claude mcp add …`, `claude plugin install …`, or `claude` to open the TUI |
 | `sudo bash deploy/deploy.sh status` / `logs` | Service status and recent logs, or follow logs |
 | `sudo bash deploy/deploy.sh uninstall [--purge]` | Remove the service (`--purge` also deletes `/opt/tg-cc-bot`) |
 
-Options: `--user`, `--dir`, `--service` to change the defaults (`claude`, `/opt/tg-cc-bot`, `tg-cc-bot`); `--reconfigure` to re-enter settings; `--no-live` to skip the live Claude test. For an unattended install, export `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` and `CLAUDE_CODE_OAUTH_TOKEN`, then run `sudo -E bash deploy/deploy.sh install --yes`.
+Options: `--user` (default: the account that ran `sudo`, or the one an existing install uses), `--dir` (`/opt/tg-cc-bot`), `--service` (`tg-cc-bot`); `--reconfigure` to re-enter settings; `--no-live` to skip the live Claude test. For an unattended install, export `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` and `CLAUDE_CODE_OAUTH_TOKEN`, then run `sudo -E bash deploy/deploy.sh install --yes`.
 
 **What `check` verifies:**
 - **System:** OS, architecture, libc, systemd, memory, disk and required tools.
@@ -222,7 +239,7 @@ Claude Code signs in and makes every API request itself. The bot never reads or 
 
 Two ways to sign in the service user:
 
-- **Interactive, once:** run `claude`, then `/login`, or `sudo bash deploy/deploy.sh login`. Credentials are stored in `~/.claude/` and refresh automatically. The SDK's bundled binary reads the same location.
+- **Interactive, once:** as the account that runs the bot, run `claude`, then `/login`. Credentials are stored in `~/.claude/` and refresh automatically. The SDK's bundled binary reads the same location.
 - **Long-lived token:** run `claude setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
 
 Usage counts against your plan's normal limits; parallel chats use it faster. Anthropic announced, then [paused](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan), a change that would bill Agent SDK usage from a separate monthly credit. If that change resumes, this bot's usage will come from that credit.
@@ -234,7 +251,8 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 | Anything unclear | Run `sudo bash deploy/deploy.sh check` first; every ✗ comes with a hint |
 | The bot says Threaded Mode is off | Enable **Threaded Mode** in @BotFather → your bot → Bot Settings, then restart the bot |
 | Typing on the main screen doesn't open a new chat | In @BotFather's Threaded Mode settings, allow users to create topics |
-| `Failed to authenticate: OAuth session expired` | The service user's login expired. Run `sudo bash deploy/deploy.sh login` |
+| `Failed to authenticate: OAuth session expired` | The bot account's login expired. As that account run `claude`, then `/login` (no restart needed) |
+| The deploy stops at "Prerequisites" | Claude Code isn't installed or signed in for the account; run the commands it prints, then re-run the script |
 | "⏳ waiting for a free slot" | All `MAX_LIVE_SESSIONS` processes are busy. Wait, `/stop` another chat, or raise the limit |
 | "Auto mode isn't available…" | Expected on some accounts or models. The chat switched to `acceptEdits`; use `/mode` to choose another |
 | I deleted a chat by mistake | Its session is kept on disk; reopen it with `/resume` |
