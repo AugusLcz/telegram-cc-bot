@@ -14,6 +14,14 @@ All notable changes to this project are documented here. The format follows
   an interactive login, which could hang over SSH. The bot shares that account's Claude login,
   skills and settings; `--user` selects a dedicated account.
 
+### Fixed
+
+- `deploy.sh` could hang right after "Claude Code … ✓" in the prerequisites check. Commands run as
+  the bot's account now get stdin from `/dev/null`, a hard timeout, and output through a temp file
+  so that background helpers they leave behind (such as Claude Code's auto-updater) can't block the
+  script; checks also disable Claude Code's auto-update and non-essential traffic. A timeout now
+  produces a clear message instead of waiting.
+
 ### Removed
 
 - `deploy.sh login` (sign in with `claude` → `/login` as the bot's account instead).

@@ -161,7 +161,8 @@ env_set() {
 # Run a command as the service user with a clean environment (root's variables
 # never leak in). Secrets go through the environment, not the command line.
 #   AS_USER_CWD      working directory (default: the user's home)
-#   AS_USER_TIMEOUT  seconds before the command is killed
+#   AS_USER_TIMEOUT  seconds before the command is stopped (killed 5 s later if needed)
+#   AS_USER_QUIET    set: Claude Code skips auto-update and other background traffic
 as_user() {
   local path="$SVC_HOME/.bun/bin:$SVC_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   local -a vars=(HOME="$SVC_HOME" USER="$SVC_USER" LOGNAME="$SVC_USER" SHELL=/bin/bash PATH="$path"
@@ -170,12 +171,34 @@ as_user() {
   for v in CLAUDE_CODE_OAUTH_TOKEN HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy; do
     if [[ -n ${!v:-} ]]; then vars+=("$v=${!v}"); fi
   done
+  if [[ -n ${AS_USER_QUIET:-} ]]; then vars+=(DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1); fi
   local -a pre=()
-  if [[ -n ${AS_USER_TIMEOUT:-} ]]; then pre=(timeout "$AS_USER_TIMEOUT"); fi
+  if [[ -n ${AS_USER_TIMEOUT:-} ]]; then pre=(timeout -k 5 "$AS_USER_TIMEOUT"); fi
   (
     cd "${AS_USER_CWD:-$SVC_HOME}" 2>/dev/null || cd /
     exec env -i "${vars[@]}" ${pre[@]+"${pre[@]}"} runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" PATH="$path" "$@"
   )
+}
+
+# user_run [-q] SECS CMD...: run CMD as the service user, non-interactively, with a hard
+# time limit, and print its output (-q: stdout only). Returns CMD's status (124: timed out).
+# Output goes through a temp file and only the direct child is awaited, so helper
+# processes a command leaves behind (an auto-updater, say) can never block the script.
+user_run() {
+  local quiet_err=0 secs out rc=0
+  if [[ $1 == -q ]]; then quiet_err=1; shift; fi
+  secs=$1
+  shift
+  out=$(mktemp)
+  if ((quiet_err)); then
+    AS_USER_QUIET=1 AS_USER_TIMEOUT=$secs as_user "$@" </dev/null >"$out" 2>/dev/null &
+  else
+    AS_USER_QUIET=1 AS_USER_TIMEOUT=$secs as_user "$@" </dev/null >"$out" 2>&1 &
+  fi
+  wait $! || rc=$?
+  cat "$out"
+  rm -f "$out"
+  return "$rc"
 }
 
 # Telegram Bot API call. The token travels via curl's stdin config, not argv.
@@ -314,7 +337,7 @@ check_bun() {
   section "Bun runtime"
   if [[ -z $BUN || ! -x $BUN ]]; then bad "Bun not installed for '$SVC_USER' (expected $BUN)"; return 0; fi
   local v
-  v=$(as_user "$BUN" --version 2>/dev/null || true)
+  v=$(user_run -q 30 "$BUN" --version | head -n1 || true)
   if [[ -z $v ]]; then
     bad "Bun at $BUN does not run"
   elif ver_ge "$v" "$MIN_BUN"; then
@@ -351,7 +374,7 @@ check_code() {
 
   if [[ -n $BUN && -x $BUN ]]; then
     local probe="for (const m of ['$INSTALL_DIR/src/core/config.ts', '$INSTALL_DIR/src/app/bot.ts', '@anthropic-ai/claude-agent-sdk', 'grammy', '@grammyjs/runner']) await import(m);"
-    if AS_USER_CWD=$INSTALL_DIR AS_USER_TIMEOUT=60 as_user "$BUN" -e "$probe" >/dev/null 2>&1; then
+    if AS_USER_CWD=$INSTALL_DIR user_run 60 "$BUN" -e "$probe" >/dev/null; then
       ok "Modules load under Bun"
     else
       bad "Modules fail to load under Bun"
@@ -365,7 +388,7 @@ check_code() {
     return 0
   fi
   local v
-  v=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_BIN" --version 2>/dev/null | head -n1 || true)
+  v=$(user_run -q 30 "$CLAUDE_BIN" --version | head -n1 || true)
   if [[ -n $v ]]; then ok "Claude Code $v"; info "$CLAUDE_BIN"; else bad "Claude Code binary does not run: $CLAUDE_BIN"; fi
 }
 
@@ -510,7 +533,12 @@ check_claude_auth() {
   section "Claude sign-in"
   if [[ -z $CLAUDE_BIN ]]; then bad "Skipped: Claude Code binary not found"; return 0; fi
   local out rc=0
-  out=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_BIN" auth status 2>&1) || rc=$?
+  out=$(user_run 30 "$CLAUDE_BIN" auth status) || rc=$?
+  if ((rc == 124)); then
+    bad "\`claude auth status\` did not answer within 30 s"
+    hint "Run it yourself to see what it waits for: sudo -iu $SVC_USER claude auth status"
+    return 0
+  fi
   if ((rc == 0)); then
     local method email
     method=$(json_str "$out" authMethod)
@@ -519,7 +547,7 @@ check_claude_auth() {
     if [[ $method == oauth_token ]]; then info "Using CLAUDE_CODE_OAUTH_TOKEN from .env (only the live test proves it is valid)"; fi
   else
     local text
-    text=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_BIN" auth status --text 2>&1 || true)
+    text=$(user_run 30 "$CLAUDE_BIN" auth status --text || true)
     if grep -qi expired <<<"$text"; then bad "Claude login expired"; else bad "Not signed in to Claude"; fi
     hint "Sign in again as $SVC_USER: sudo -iu $SVC_USER claude, then /login (or set CLAUDE_CODE_OAUTH_TOKEN)"
     return 0
@@ -533,10 +561,10 @@ check_claude_auth() {
 live_probe() {
   local out rc=0
   local -a args=(-p "Reply with exactly the word OK" --model haiku --tools "" --output-format json --no-session-persistence)
-  out=$(AS_USER_TIMEOUT=120 as_user "$CLAUDE_BIN" --safe-mode "${args[@]}" 2>&1) || rc=$?
+  out=$(user_run 120 "$CLAUDE_BIN" --safe-mode "${args[@]}") || rc=$?
   if [[ $out == *"unknown option"* ]]; then
     rc=0
-    out=$(AS_USER_TIMEOUT=120 as_user "$CLAUDE_BIN" "${args[@]}" 2>&1) || rc=$?
+    out=$(user_run 120 "$CLAUDE_BIN" "${args[@]}") || rc=$?
   fi
   if [[ $out == *'"is_error":false'* ]]; then
     ok "Live round-trip to Claude succeeded (reply: $(json_str "$out" result))"
@@ -699,15 +727,17 @@ find_user_claude() {
   for p in "$SVC_HOME/.local/bin/claude" "$SVC_HOME/.claude/local/claude" "$SVC_HOME/.npm-global/bin/claude"; do
     if [[ -x $p ]]; then printf '%s' "$p"; return 0; fi
   done
-  p=$(AS_USER_TIMEOUT=15 as_user bash -lc 'command -v claude' 2>/dev/null | tail -n1 || true)
+  p=$(user_run -q 15 bash -lc 'command -v claude' | tail -n1 || true)
   if [[ $p == /* && -x $p ]]; then printf '%s' "$p"; fi
 }
 
 # Is the service user signed in to Claude (with the given claude binary)?
+# Returns 0 signed in, 1 not signed in, 2 Claude Code did not answer in time.
 SIGNIN_METHOD=''
 user_signed_in() {
   local out rc=0
-  out=$(AS_USER_TIMEOUT=30 as_user "$1" auth status 2>&1) || rc=$?
+  out=$(user_run 30 "$1" auth status) || rc=$?
+  if ((rc == 124)); then return 2; fi
   if ((rc == 0)); then
     SIGNIN_METHOD=$(json_str "$out" authMethod)
     return 0
@@ -747,17 +777,23 @@ step_prerequisites() {
   CLAUDE_CLI=$(find_user_claude)
   [[ -n $CLAUDE_CLI ]] || prereq_fail "Claude Code is not installed for '$SVC_USER'"
   local v
-  v=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_CLI" --version 2>/dev/null | head -n1 || true)
+  info "Asking Claude Code for its version…"
+  v=$(user_run -q 30 "$CLAUDE_CLI" --version | head -n1 || true)
   [[ -n $v ]] || prereq_fail "Claude Code at $CLAUDE_CLI does not run for '$SVC_USER'"
   ok "Claude Code $v ($CLAUDE_CLI)"
 
   # A token handed in through the environment counts as signed in (it is saved to .env later).
   if [[ -n ${FROM_ENV[CLAUDE_CODE_OAUTH_TOKEN]:-} ]]; then export CLAUDE_CODE_OAUTH_TOKEN=${FROM_ENV[CLAUDE_CODE_OAUTH_TOKEN]}; fi
-  if user_signed_in "$CLAUDE_CLI"; then
+  info "Checking the Claude sign-in (claude auth status)…"
+  local signed=0
+  user_signed_in "$CLAUDE_CLI" || signed=$?
+  if ((signed == 0)); then
     ok "Signed in to Claude${SIGNIN_METHOD:+ ($SIGNIN_METHOD)}; the bot shares this login"
+  elif ((signed == 2)); then
+    die "\`claude auth status\` did not answer within 30 s for '$SVC_USER'. Run it yourself to see what it waits for: sudo -iu $SVC_USER claude auth status"
   else
     local text
-    text=$(AS_USER_TIMEOUT=30 as_user "$CLAUDE_CLI" auth status --text 2>&1 || true)
+    text=$(user_run 30 "$CLAUDE_CLI" auth status --text || true)
     if grep -qi expired <<<"$text"; then prereq_fail "The Claude login of '$SVC_USER' has expired"; fi
     prereq_fail "'$SVC_USER' is not signed in to Claude"
   fi
@@ -766,14 +802,14 @@ step_prerequisites() {
 step_bun() {
   section "Bun runtime"
   local v=''
-  if [[ -x $BUN ]]; then v=$(as_user "$BUN" --version 2>/dev/null || true); fi
+  if [[ -x $BUN ]]; then v=$(user_run -q 30 "$BUN" --version | head -n1 || true); fi
   if [[ -n $v ]] && ver_ge "$v" "$MIN_BUN"; then
     ok "Bun $v already installed"
     return 0
   fi
   info "Installing Bun for $SVC_USER…"
-  as_user bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null
-  v=$(as_user "$BUN" --version 2>/dev/null || true)
+  user_run 300 bash -c 'curl -fsSL https://bun.sh/install | bash' >/dev/null || die "Bun installation failed"
+  v=$(user_run -q 30 "$BUN" --version | head -n1 || true)
   [[ -n $v ]] || die "Bun installation failed"
   ok "Bun $v installed at $BUN"
 }
@@ -797,14 +833,14 @@ step_code() {
 
   info "Installing dependencies…"
   local out
-  if ! out=$(AS_USER_CWD=$INSTALL_DIR as_user "$BUN" install --production 2>&1); then
+  if ! out=$(AS_USER_CWD=$INSTALL_DIR user_run 900 "$BUN" install --production); then
     printf '%s\n' "$out" | tail -n 20
     die "bun install failed"
   fi
   ok "Dependencies installed"
   resolve_paths
   [[ -n $CLAUDE_BIN ]] || die "Claude Code binary missing after install (the SDK's platform package was not installed)"
-  ok "Claude Code $(AS_USER_TIMEOUT=30 as_user "$CLAUDE_BIN" --version 2>/dev/null | head -n1 || true)"
+  ok "Claude Code $(user_run -q 30 "$CLAUDE_BIN" --version | head -n1 || true)"
 }
 
 discover_user_ids() {
