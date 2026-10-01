@@ -1,0 +1,215 @@
+# tg-cc-bot
+
+[English](README.md) · [架构文档（英文）](docs/ARCHITECTURE.md)
+
+用 Telegram 遥控服务器上的 **Claude Code**，用你自己的 **Claude 订阅（Pro/Max）登录**。聊天里的**每个 tab 就是一个独立的 Claude Code 会话**。
+
+底层是官方 [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) 驱动的、未修改的 Claude Code 进程。Agent 循环、工具、skills、CLAUDE.md、MCP、hooks、权限系统都由 Claude Code 自己处理。bot 负责收发消息、渲染输出、把提示变成按钮，并管理哪些会话需要有进程在跑。
+
+> 合规说明：Anthropic 不允许把订阅 OAuth token 拿出来自己调 API（OpenClaw 那种做法）。这里由 Claude Code 二进制自己完成登录和请求，属于"用户用自己的订阅登录未修改的 Claude Code"。用量计入你的订阅额度，多个 tab 并行时消耗更快。2026 年 6 月那次"SDK 单独额度池"的改动已暂停，如果将来恢复，SDK 用量会改走单独额度。
+
+## 使用模型：tab 就是会话
+
+Telegram 可以把和 bot 的私聊分成多个 **tab**（话题，显示在聊天顶部）。tg-cc-bot 这样使用它们：
+
+| 位置 | 是什么 | 在这里做什么 |
+|---|---|---|
+| **主界面**（tab 之外） | 控制面板 | 只接受命令：选择或添加当前**项目**、开 tab、查看会话、改默认设置、看状态 |
+| **某个 tab** | 一个 Claude Code 会话，工作在开 tab 时的当前项目里 | 和 Claude 对话、发图片和文件、使用 Claude Code 的斜杠命令和你的 skills |
+
+用 `/new` 或 Telegram 的 **+** 按钮开 tab，两种方式都用当前项目。想换目录工作，先在主界面切换当前项目（`/projects`），再开新 tab。之前的会话（包括在服务器终端里用 Claude Code 开的会话）可以用 `/resume` 在新 tab 里打开。
+
+## 功能
+
+- **并行会话**：多个 tab 可以同时工作，各自有项目目录、模型、权限模式和 effort。
+- **流式回复**：用 `sendMessageDraft` 实时预览，不可用时自动改成编辑消息。最终回复把 Markdown 转成 Telegram HTML；太长会安全切分（代码块不会被切断），特别长的转成 `.md` 文件发送。
+- **工具调用压缩显示**：例如 `💻 Bash ls -la`，子代理的调用缩进显示。`/verbose` 额外显示工具输出和耗时。
+- **提示变成按钮**：权限请求（允许 / 总是允许 / 拒绝）、`AskUserQuestion`（单选、多选）、计划审批，都显示在发起请求的那个 tab 里。有提示等待时直接回复文字，等于拒绝并告诉 Claude 该怎么做，或者用你自己的话回答问题。
+- **完整的 Claude Code 命令**：内置命令、自带 skills、你的个人和项目 skills、插件命令、`.claude/commands` 都能在 tab 里用，也会出现在 Telegram 命令菜单里。
+- **tab 标题**：没命名的 tab 会用第一句提问自动命名，你自己起的名字不会被覆盖。`/rename` 同时修改 tab 名和会话名。
+- **图片和文件**：图片直接发给 Claude 看；文件存到 `<项目>/.tg-uploads/`，再把路径告诉 Claude。
+- **状态提示**：上下文压缩、API 重试、用量预警、权限被拒都会提示。在 tab 里 `/status` 显示该会话的上下文占用；在主界面显示进程池状态。
+- bot 自身的界面消息（按钮、提示、命令说明）是英文；Claude 的回复语言跟随你的提问。
+
+## 命令
+
+### 主界面
+
+| 命令 | 作用 |
+|---|---|
+| `/projects` | 列出项目，按钮切换当前项目 |
+| `/project add <名称> <路径>` | 登记一个项目目录（必须存在，设置了 `ALLOWED_ROOTS` 时必须在其范围内），并设为当前项目 |
+| `/project use <名称>` · `/project rm <名称>` | 切换当前项目 · 删除项目（已有的 tab 不受影响） |
+| `/new [标题]` | 在当前项目里开一个新 tab |
+| `/resume [all\|id]` | 在 tab 里打开之前的会话（当前项目、全部项目，或按 ID） |
+| `/sessions` | 你的 tab 及其状态：🟢 运行中、🟡 空闲、⚪ 已休眠 |
+| `/settings` | 新 tab 的默认模型、权限模式、effort、verbose |
+| `/status` | 运行中的进程、排队的消息、内存、Claude Code 版本 |
+| `/help` | 当前界面的帮助 |
+
+在主界面发普通文字不会转给 Claude，bot 会回复一条提示。
+
+### tab 里
+
+| 命令 | 作用 |
+|---|---|
+| `/stop` | 中断当前回合，取消待处理的提示，以及还在排队等进程的消息 |
+| `/model [名称]` · `/mode [模式]` · `/effort [等级]` | 查看（按钮）或修改这个 tab 的模型、权限模式、effort |
+| `/verbose` | 开关这个 tab 的工具输出和耗时 |
+| `/status` | 会话 ID、项目、设置、进程状态、上下文占用 |
+| `/rename <标题>` | 重命名这个会话和 tab |
+| `/fork` | 把这个会话复制到一个新 tab |
+| `/close` | 立即关闭这个 tab 的进程；下一条消息会自动恢复 |
+| `/delete` | 确认后删除 tab 及其消息（会话本身保留，仍可恢复） |
+| `/new`、`/resume`、`/help` | 和主界面一样 |
+
+其它斜杠命令原样交给 Claude Code：`/compact`、`/context`、`/usage`、`/clear`、`/init`、`/config key=value`、`/output-style`、`/code-review`，以及你所有的 skills 和插件命令，可以带参数。
+
+Telegram 菜单名只允许 `[a-z0-9_]`，所以 `code-review` 在菜单里显示为 `/code_review`，`plugin:skill` 显示为 `/plugin_skill`，两种写法都能用。命令用错地方会有一句提示告诉你该去哪里用。
+
+## 会话和进程
+
+会话不等于进程。Claude Code 会话保存在磁盘上的记录里，只有会话正在工作时才需要一个运行中的 Claude Code 进程。
+
+- tab 的进程在第一条消息时启动；会话已经存在时则是恢复。
+- 空闲超过 `SESSION_IDLE_MINUTES`（15 分钟）后进程会被关闭。下一条消息自动恢复会话，大约需要 1 秒。
+- 同时最多运行 `MAX_LIVE_SESSIONS`（3）个进程。需要新进程时，关掉最久没用的空闲进程；如果全都在忙，消息会排队（"⏳ waiting for a free slot"），`/stop` 可以取消排队。
+- 进程在工作、等你回答提示、或有后台任务时，绝不会被关闭（后台任务最长 `BACKGROUND_MAX_MINUTES`）。
+- 存在进程里的设置（模型、权限模式、effort）按 tab 保存，每次恢复都会带上。
+- bot 重启后所有 tab 都处于休眠状态，下一条消息时自动恢复。
+
+完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 权限和安全
+
+- **谁能用**：只有 `ALLOWED_USER_IDS` 里的 Telegram 用户，而且只在私聊里。其他人只会收到一条包含其 user ID 的回复，方便你决定是否把他加进来。群聊一律忽略。没配置白名单时 bot 拒绝启动。
+- **默认 `auto` 模式**：常规操作由 Claude Code 的分类器自动批准，需要升级的操作以按钮形式询问。账户或模型不支持 auto 时，该 tab 会自动改为 `acceptEdits` 并告诉你。
+- **无人响应的提示**在 `PERMISSION_TIMEOUT_MS`（默认 10 分钟）后自动拒绝。
+- **`bypassPermissions`**（通过 `/mode` 或 `/settings`）让 Claude 不经询问执行任何操作，只在你愿意让 Claude 随意改动的机器上用。
+- **项目目录**可以用 `ALLOWED_ROOTS` 限制在指定目录下。
+- Claude Code 以服务用户身份运行，拥有该用户的文件权限。请用专用账户，不要用 root。
+
+## 部署（Linux）
+
+先在 [@BotFather](https://t.me/BotFather) `/newbot` 拿到 bot token，并在 bot → **Bot Settings → Threaded Mode** 里开启话题模式。然后在服务器上一条命令完成安装、配置、登录、启动和自查：
+
+```bash
+git clone <本仓库> tg-cc-bot && cd tg-cc-bot
+sudo bash deploy/deploy.sh
+```
+
+脚本依次执行以下步骤，可以随时重复运行：
+
+1. **预检**：确认是 Linux x64/arm64 且有 systemd；缺 `curl`、`unzip`、`git` 就自动安装；检查 Telegram、Anthropic、bun.sh 和 npm 能否连通。
+2. **服务用户**：没有 `claude` 用户就创建。
+3. **Bun**：为该用户安装；已有且版本够新就跳过。
+4. **应用**：把代码复制到 `/opt/tg-cc-bot` 并安装依赖，Agent SDK 会带上对应版本的 Claude Code。
+5. **配置**：
+   - 生成权限为 600 的 `.env`。
+   - 询问 bot token，并用 Telegram 接口验证；话题模式没开会提醒你。
+   - 询问 user ID：可以直接填；也可以留空，然后给 bot 发一条消息，脚本会自动识别。
+   - 询问第一个项目的目录。
+6. **Claude 登录**：可选浏览器登录，或者用 `setup-token` 生成长期 token；已登录则跳过。
+7. **服务**：生成并启用 systemd unit，启动后一直等到日志里出现 polling 和 "Claude Code ready"。
+8. **自查**：完整跑一遍下面的健康检查，并输出汇总。
+
+日常命令：
+
+| 命令 | 作用 |
+|---|---|
+| `sudo bash deploy/deploy.sh check` | 只读的全面自查 |
+| `sudo bash deploy/deploy.sh update` | `git pull` 之后用：复制新代码、重装依赖、重启并自查 |
+| `sudo bash deploy/deploy.sh login` | 重新登录（登录过期、换账号、改用长期 token） |
+| `sudo bash deploy/deploy.sh claude …` | 以服务用户身份运行 Claude Code，比如 `claude mcp add …`、`claude plugin install …`，或者直接 `claude` 打开终端界面 |
+| `sudo bash deploy/deploy.sh status` / `logs` | 查看服务状态和最近日志 / 实时跟踪日志 |
+| `sudo bash deploy/deploy.sh uninstall [--purge]` | 移除服务（`--purge` 同时删掉 `/opt/tg-cc-bot`） |
+
+**参数：**
+- `--user`、`--dir`、`--service`：修改默认的用户、目录和服务名（`claude`、`/opt/tg-cc-bot`、`tg-cc-bot`）。
+- `--reconfigure`：重新填写配置。
+- `--no-live`：跳过实际调用 Claude 的测试。
+- 无人值守安装：先 export `TELEGRAM_BOT_TOKEN`、`ALLOWED_USER_IDS`、`CLAUDE_CODE_OAUTH_TOKEN`，再运行 `sudo -E bash deploy/deploy.sh install --yes`。
+
+**`check` 检查的内容：**
+- **系统**：系统版本、CPU 架构、libc、systemd、内存、磁盘、必需工具。
+- **网络**：Telegram、Anthropic、claude.ai 能否连通。
+- **服务用户**和 **Bun** 版本。
+- **应用**：
+  - 代码目录的所有者、依赖版本
+  - 模块能否在 Bun 下正常加载
+  - Claude Code 二进制能否运行
+- **配置**：
+  - `.env` 的文件权限
+  - bot token 和 user ID 的格式
+  - 第一个项目目录对服务用户是否可写
+  - 各项模式、effort、日志级别、状态文件目录
+  - 进程数上限，以及它和机器内存是否匹配
+- **Telegram**：`getMe` 是否接受 token，话题模式是否开启，用户能否自己开 tab，有没有设置 webhook。
+- **Claude 登录**：
+  - 先看 `claude auth status`。
+  - 再用 Haiku 发一次很小的真实请求。`auth status` 无法判断 token 是否有效，所以必须实际调一次。
+- **服务**：
+  - unit 文件是否存在，是否开机自启、是否在运行，重启了几次
+  - 本次运行的日志里有没有 polling 和 "Claude Code ready"
+  - 常见故障会附上原因：401（token 错误）、409（同一个 bot 有别的实例在拉取消息）、缺少配置项、权限不足
+
+用的是 long polling，服务器不需要公网 HTTPS 入口。
+
+想在部署前单独确认话题功能在你的 bot 上可用，可以运行：`CHAT_ID=<你的 user ID> bun scripts/topics-spike.ts`（先停掉正在运行的 bot）。
+
+## 配置项（`.env`）
+
+完整注释见 [.env.example](.env.example)。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | 必填 | BotFather 给的 token |
+| `ALLOWED_USER_IDS` | 必填 | 允许使用的 Telegram user ID，逗号分隔 |
+| `DEFAULT_CWD` | 家目录 | 第一个项目（`home`）的目录；更多项目用 `/project add` 添加 |
+| `ALLOWED_ROOTS` | 不限 | 项目必须位于的目录，逗号分隔 |
+| `DEFAULT_MODEL` | Claude Code 默认 | 新 tab 的模型（`opus`、`sonnet`、完整 ID…） |
+| `DEFAULT_PERMISSION_MODE` | `auto` | 新 tab 的权限模式 |
+| `DEFAULT_EFFORT` | 模型默认 | 新 tab 的 effort：`low`、`medium`、`high`、`xhigh`、`max` |
+| `MAX_LIVE_SESSIONS` | `3` | 同时运行的 Claude Code 进程数上限 |
+| `SESSION_IDLE_MINUTES` | `15` | 空闲多久后关闭进程 |
+| `BACKGROUND_MAX_MINUTES` | `120` | 只剩后台任务在跑的进程，多久后关闭 |
+| `CLAUDE_PATH` | SDK 自带 | 改用系统安装的 `claude` |
+| `STATE_FILE` | `./data/state.json` | 项目、tab、设置的存储位置 |
+| `STREAM_MODE` | `draft` | 实时预览：`draft` / `edit` / `off` |
+| `PERMISSION_TIMEOUT_MS` | `600000` | 提示无人响应时多久后自动拒绝 |
+| `LOG_LEVEL` | `info` | 设为 `debug` 时也记录 Claude Code 的 stderr |
+| `CLAUDE_CODE_OAUTH_TOKEN` | 不设置 | 可选，`claude setup-token` 生成的长期 token |
+
+新 tab 的默认设置也可以在 Telegram 里用 `/settings` 修改，它优先于上面的 `DEFAULT_*`。Claude Code 自己的配置照常生效：`~/.claude/settings.json`、`~/.claude/skills`、每个项目的 `.claude/` 目录、`CLAUDE.md`、`.mcp.json`。
+
+## 排错
+
+| 现象 | 处理 |
+|---|---|
+| 不确定哪里有问题 | 先跑 `sudo bash deploy/deploy.sh check`，每个 ✗ 都附有修复提示 |
+| `/new` 提示 tab 不可用 | 在 @BotFather → 你的 bot → Bot Settings 里开启 **Threaded Mode**，然后重启 bot |
+| 回复 `Failed to authenticate: OAuth session expired` | 服务用户的登录过期了，运行 `sudo bash deploy/deploy.sh login` |
+| 出现 "⏳ waiting for a free slot" | `MAX_LIVE_SESSIONS` 个进程都在忙。等一下、在别的 tab 用 `/stop`，或调高上限 |
+| 提示 "Auto mode isn't available…" | 部分账户或模型会这样。该 tab 已改为 `acceptEdits`，可以用 `/mode` 换成别的 |
+| 主界面提示某个 tab 已不存在 | 你删掉了这个 tab；会话还保存在磁盘上，需要时用 `/resume` 打开 |
+| 流式预览不动 | 设置 `STREAM_MODE=edit`（drafts 不可用时 bot 也会自动切换） |
+| bot 完全没反应 | 确认你的 ID 在 `ALLOWED_USER_IDS` 里、用的是私聊，并且 `journalctl -u tg-cc-bot` 里有 `polling` |
+
+## 开发
+
+```bash
+npm install          # 或 bun install
+npm run typecheck
+npm test             # 单元、进程池、领域层和控制器测试（node:test）
+npm run start:node   # 用 Node 24 运行（读取 .env）
+```
+
+代码分层为 `core` → `store` / `claude` / `telegram` → `domain` → `app`。模块划分、生命周期状态机、数据模型和扩展点见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。测试用假的 Claude 进程工厂和会记录调用的 Telegram API，整个 bot 不联网也能跑。
+
+## 限制
+
+- **只支持私聊**：群聊忽略。多个白名单用户各自有自己的聊天、tab 和默认设置，但共享项目列表和进程上限。
+- **一个 token 只能有一个实例在拉取消息**：不要用同一个 token 再跑一份（比如开发用的副本）。
+- **媒体**：只支持文字、图片和文件（不支持语音和视频）。Telegram 限制 bot 只能下载 20 MB 以内的文件。
+- **只能在终端里用的命令**（`/theme`、`/login`、`/terminal-setup`、交互式 `/config` 菜单）在 SDK 会话里不可用。
+- 会话里的**定时唤醒**（`/loop`、cron 工具）在进程休眠后不会保留。
