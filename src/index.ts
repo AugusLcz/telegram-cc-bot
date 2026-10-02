@@ -3,6 +3,7 @@ import { Bot } from "grammy";
 import { SdkProcessFactory } from "./claude/process.ts";
 import { sdkSessionApi } from "./claude/sessions.ts";
 import { loadConfig } from "./core/config.ts";
+import { acquireInstanceLock } from "./core/instance-lock.ts";
 import { createLogger } from "./core/logger.ts";
 import { JsonFileStore } from "./store/store.ts";
 import { Poller } from "./telegram/polling.ts";
@@ -20,6 +21,16 @@ try {
   process.exit(1);
 }
 const me = bot.botInfo;
+
+// One copy of this bot per machine: a second one would fight over getUpdates (409 Conflict).
+let lock: ReturnType<typeof acquireInstanceLock>;
+try {
+  lock = acquireInstanceLock(me.id);
+} catch (err) {
+  log.error(`not starting: ${(err as Error).message}`);
+  process.exit(1);
+}
+process.on("exit", () => lock.release());
 const botInfo = {
   username: me.username,
   hasTopics: me.has_topics_enabled === true,
@@ -46,14 +57,21 @@ app.catalog
   .then(() => log.info(`Claude Code ready: ${app.catalog.commands.length} commands, ${app.catalog.models.length} models`))
   .catch((err) => log.error("Claude Code warm-up failed (will retry on first message):", err));
 
-// Long polling; a 409 (another poller on this token) is retried with backoff instead of crashing.
+// Long polling and a webhook exclude each other: drop one left behind (as grammY's bot.start() does).
+const hook = await bot.api.getWebhookInfo().catch(() => undefined);
+if (hook?.url) {
+  log.warn(`removing the webhook ${hook.url}: this bot uses long polling`);
+  await bot.api.deleteWebhook().catch((err) => log.warn("deleteWebhook failed:", err));
+}
+
+// The only getUpdates loop; a 409 (another client on this token) is retried with backoff instead of crashing.
 const poller = new Poller(bot, {
   log: log.child("telegram"),
   onFatal: () => process.exit(1),
 });
 poller.start();
 log.info(
-  `@${botInfo.username} polling · tabs ${botInfo.hasTopics ? "on" : "OFF"} · max ${cfg.maxLiveSessions} live sessions · idle ${cfg.sessionIdleMs / 60_000}m`,
+  `@${botInfo.username} polling (pid ${process.pid}) · tabs ${botInfo.hasTopics ? "on" : "OFF"} · max ${cfg.maxLiveSessions} live sessions · idle ${cfg.sessionIdleMs / 60_000}m`,
 );
 // Chats that only ever saw bot commands keep no session; forget their leftovers after a week.
 const pruned = app.threads.pruneEmpty(7 * 24 * 60 * 60_000);

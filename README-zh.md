@@ -212,7 +212,8 @@ sudo bash deploy/deploy.sh
 | 误删了一个对话 | 会话还保存在磁盘上，用 `/resume` 重新打开 |
 | 流式预览不动 | 设置 `STREAM_MODE=edit`（drafts 不可用时 bot 也会自动切换） |
 | bot 完全没反应 | 确认你的 ID 在 `ALLOWED_USER_IDS` 里、用的是私聊，并且 `journalctl -u tg-cc-bot` 里有 `polling` |
-| 日志里有 `409: Conflict`，或者有不知道从哪来的回复 | 有别的程序在用同一个 bot token 拉取消息：手动启动的 `bun src/index.ts`、OpenClaw、`claude --channels` 会话，或者另一台机器上的副本。Telegram 规定一个 token 同时只能有一个拉取者。`sudo bash deploy/deploy.sh check` 会列出本机上的这类程序。把它停掉，或者给 tg-cc-bot 单独建一个 bot。在此期间 bot 会按间隔重试，不会崩溃 |
+| 日志里有 `409: Conflict` | Telegram 规定一个 bot token 同时只有一个拉取者，而有另一个客户端同时在拉这个 bot 的消息。bot 自己无论开多少个对话和 Claude 会话，都只有一个拉取循环。重新运行 `sudo bash deploy/deploy.sh install`：它会先停掉 bot，列出本机所有用这个 token 的进程（以及它们是怎么启动的），并在重新启动 bot 之前向 Telegram 确认是否还有别的拉取者。在此期间 bot 会按间隔重试，不会崩溃 |
+| `deploy.sh` 还没跑完就收到了回复 | 只要已经过了 “systemd service” 这一步就是正常的：bot 已经启动，正在回复它离线期间收到的消息，脚本还在做后续检查。在这一步之前 tg-cc-bot 不会运行（脚本一开始就会停掉正在运行的 bot） |
 
 ## 开发
 

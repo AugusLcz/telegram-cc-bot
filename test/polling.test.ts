@@ -55,6 +55,20 @@ test("a 409 conflict is logged and retried with backoff instead of crashing", as
   await poller.stop();
 });
 
+test("a webhook set meanwhile is removed and polling resumes, without counting as a conflict", async () => {
+  const { runFn, starts } = fakeRunner([
+    apiError(409, "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first"),
+  ]);
+  let deleted = 0;
+  const bot = { api: { deleteWebhook: async () => ((deleted += 1), true) } } as unknown as Bot;
+  const poller = new Poller(bot, { runFn, onFatal: () => assert.fail("fatal"), errorDelay: 0.02 });
+  poller.start();
+  await waitFor(() => starts.length === 2, 1000, "retry");
+  assert.equal(deleted, 1);
+  assert.equal(poller.conflictCount, 0);
+  await poller.stop();
+});
+
 test("a rejected token (401) is fatal and not retried", async () => {
   const { runFn, starts } = fakeRunner([apiError(401, "Unauthorized")]);
   let fatal: unknown;

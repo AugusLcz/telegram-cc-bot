@@ -11,6 +11,7 @@ import type { SessionApi } from "../src/claude/sessions.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { silentLogger } from "../src/core/logger.ts";
 import { MemoryStore } from "../src/store/store.ts";
+import { Poller } from "../src/telegram/polling.ts";
 import { FakeFactory, type FakeProcess, waitFor } from "./helpers/fake-process.ts";
 
 const OWNER = 42;
@@ -21,7 +22,7 @@ interface Call {
   payload: Record<string, unknown>;
 }
 
-function harness(opts: { hasTopics?: boolean } = {}) {
+function harness(opts: { hasTopics?: boolean; getUpdates?: (signal?: { addEventListener(type: "abort", fn: () => void): void }) => Promise<Update[]> } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tgcc-bot-"));
   const home = path.join(root, "home");
   const other = path.join(root, "other");
@@ -41,9 +42,10 @@ function harness(opts: { hasTopics?: boolean } = {}) {
   const goneThreads = new Set<number>();
   let messageId = 1000;
   let threadId = 900; // topics the bot creates itself (/resume, /fork)
-  bot.api.config.use(async (_prev, method, payload) => {
+  bot.api.config.use(async (_prev, method, payload, signal) => {
     const p = (payload ?? {}) as Record<string, unknown>;
     calls.push({ method, payload: p });
+    if (method === "getUpdates" && opts.getUpdates) return { ok: true, result: await opts.getUpdates(signal) } as never;
     if (typeof p.message_thread_id === "number" && goneThreads.has(p.message_thread_id)) {
       return { ok: false, error_code: 400, description: "Bad Request: message thread not found" } as never;
     }
@@ -84,10 +86,11 @@ function harness(opts: { hasTopics?: boolean } = {}) {
   app.catalog.update({ commands: [{ name: "code-review", description: "Review", argumentHint: "" }] });
 
   let updateId = 1;
-  const send = (text: string, opts: { thread?: number; from?: number; extra?: Record<string, unknown> } = {}) => {
+  type SendOpts = { thread?: number; from?: number; extra?: Record<string, unknown> };
+  const message = (text: string, opts: SendOpts = {}): Update => {
     const from = opts.from ?? OWNER;
     const entities = text.startsWith("/") ? [{ type: "bot_command", offset: 0, length: text.split(/\s/)[0].length }] : undefined;
-    const update = {
+    return {
       update_id: updateId++,
       message: {
         message_id: updateId,
@@ -99,9 +102,9 @@ function harness(opts: { hasTopics?: boolean } = {}) {
         ...(opts.thread ? { message_thread_id: opts.thread, is_topic_message: true } : {}),
         ...opts.extra,
       },
-    };
-    return bot.handleUpdate(update as unknown as Update);
+    } as unknown as Update;
   };
+  const send = (text: string, opts: SendOpts = {}) => bot.handleUpdate(message(text, opts));
   const press = (data: string, thread?: number) =>
     bot.handleUpdate({
       update_id: updateId++,
@@ -123,8 +126,43 @@ function harness(opts: { hasTopics?: boolean } = {}) {
     calls.filter((c) => c.method === "sendMessage" && filter(c)).map((c) => String(c.payload.text));
   const inThread = (t?: number) => (c: Call) => c.payload.message_thread_id === t;
 
-  return { app: app as App, bot, calls, goneThreads, factory, store, send, press, texts, inThread, home, other };
+  return { app: app as App, bot, calls, goneThreads, factory, store, message, send, press, texts, inThread, home, other };
 }
+
+test("messages left in two chats while the bot was down: one poll loop serves both sessions", async () => {
+  // Telegram queues both messages; on start, the first getUpdates returns them together, and
+  // every later one is a long poll that waits until polling stops.
+  let backlog: Update[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let polls = 0;
+  const h = harness({
+    getUpdates: async (signal) => {
+      polls++;
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        if (polls === 1) return backlog;
+        return await new Promise<Update[]>((_, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+      } finally {
+        inFlight--;
+      }
+    },
+  });
+  backlog = [h.message("first task", { thread: 500 }), h.message("second task", { thread: 501 })];
+  const poller = new Poller(h.bot, { onFatal: () => assert.fail("fatal") });
+  poller.start();
+  try {
+    await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: first task")), 2000, "reply in chat 500");
+    await waitFor(() => h.texts(h.inThread(501)).some((t) => t.includes("reply: second task")), 2000, "reply in chat 501");
+    assert.equal(h.factory.created.length, 2, "one Claude Code process per chat");
+    assert.ok(polls >= 2, "kept long-polling while both sessions ran");
+    assert.equal(maxInFlight, 1, "never two getUpdates at once, however many sessions run");
+    assert.equal(h.calls.filter((c) => c.method === "getUpdates").length, polls, "only the poller asks for updates");
+  } finally {
+    await poller.stop();
+  }
+});
 
 test("strangers only learn their user ID, once per cooldown", async () => {
   const h = harness();

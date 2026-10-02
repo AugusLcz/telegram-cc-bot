@@ -258,7 +258,8 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 | I deleted a chat by mistake | Its session is kept on disk; reopen it with `/resume` |
 | Live preview doesn't update | Set `STREAM_MODE=edit` (the bot also falls back automatically if drafts fail) |
 | Bot doesn't respond at all | Check your ID is in `ALLOWED_USER_IDS`, you're in a private chat, and `journalctl -u tg-cc-bot` shows `polling` |
-| `409: Conflict` in the logs, or replies come from somewhere else | Another program polls the same bot token: a manually started `bun src/index.ts`, OpenClaw, a `claude --channels` session, or a copy on another machine. Telegram allows one poller per token. `sudo bash deploy/deploy.sh check` lists the ones on this server. Stop it, or create a separate bot for tg-cc-bot. The bot keeps retrying meanwhile instead of crashing |
+| `409: Conflict` in the logs | Telegram serves one poller per bot token, and another client asked for this bot's updates at the same time. The bot itself polls from one loop only, however many chats and Claude sessions run. Re-run `sudo bash deploy/deploy.sh install`: it stops the bot first, lists every local process using the token (with how it was started), and asks Telegram whether anything else still polls before it starts the bot again. The bot keeps retrying meanwhile instead of crashing |
+| Replies arrive while `deploy.sh` is still running | Expected once the "systemd service" step has started the bot: it answers messages sent while it was offline, while the script finishes its checks. Before that step nothing of tg-cc-bot runs (the script stops a running bot first) |
 
 ## Development
 

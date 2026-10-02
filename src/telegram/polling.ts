@@ -24,11 +24,14 @@ export function defaultConflictDelay(n: number): number {
 const runBot = (bot: Bot) => run(bot, { runner: { fetch: { allowed_updates: ["message", "callback_query"] } } });
 
 /**
- * Long-polls Telegram and keeps doing so. grammY's runner gives up on a 409
- * (another process polls the same token) and on a 401; left unhandled, that
- * crashes the bot and systemd restarts it every few seconds, stealing updates
- * back and forth with the other poller. Instead, a conflict is logged clearly
- * and retried with growing pauses, and a 401 is reported once as fatal.
+ * Long-polls Telegram and keeps doing so. This is the bot's only getUpdates
+ * loop: Claude Code sessions never talk to Telegram, and one runner runs at a
+ * time (a new one starts only after the previous one failed). grammY's runner
+ * gives up on a 409 (another client polls the same token) and on a 401; left
+ * unhandled, that crashes the bot and systemd restarts it every few seconds,
+ * stealing updates back and forth with the other client. Instead, a conflict is
+ * logged with Telegram's own words and retried with growing pauses, a webhook
+ * set meanwhile is removed, and a 401 is reported once as fatal.
  */
 export class Poller {
   private readonly bot: Bot;
@@ -65,19 +68,26 @@ export class Poller {
   private onError(err: unknown): void {
     if (this.stopped) return;
     const code = err instanceof GrammyError ? err.error_code : undefined;
+    const description = err instanceof GrammyError ? err.description : "";
     if (code === 401) {
       this.log.error("Telegram 401: Unauthorized: the bot token was rejected; check TELEGRAM_BOT_TOKEN");
       this.opts.onFatal(err);
       return;
     }
     let delay: number;
-    if (code === 409) {
+    if (code === 409 && /webhook/i.test(description)) {
+      // Someone set a webhook after we started: polling gets nothing until it is gone.
+      delay = this.opts.errorDelay ?? 10;
+      this.log.warn(`Telegram 409: ${description}. Removing the webhook (this bot uses long polling); retrying in ${delay}s`);
+      this.bot.api.deleteWebhook().catch((e) => this.log.warn("deleteWebhook failed:", e));
+    } else if (code === 409) {
+      // Telegram ends a waiting getUpdates this way when a newer one for the same token arrives.
       this.conflicts++;
       delay = (this.opts.conflictDelay ?? defaultConflictDelay)(this.conflicts);
       this.log.error(
-        `Telegram 409: Conflict: another process is polling this bot token (a second copy of this bot, OpenClaw, ` +
-          `a \`claude --channels\` session, another machine…). Only one may poll; stop the other one or give this bot ` +
-          `its own token. Retrying in ${delay}s (conflict #${this.conflicts}).`,
+        `Telegram 409: ${description || "Conflict"}. Another client asked for this bot's updates while this one ` +
+          `(pid ${process.pid}) was waiting; Telegram serves only one. Retrying in ${delay}s (conflict #${this.conflicts}). ` +
+          `\`sudo deploy/deploy.sh check\` lists local processes using the token.`,
       );
     } else {
       delay = this.opts.errorDelay ?? 10;

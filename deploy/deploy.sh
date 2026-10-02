@@ -78,11 +78,20 @@ info()    { printf '  %s·%s %s\n' "$DIM" "$RESET" "$*"; }
 hint()    { printf '    %s↳ %s%s\n' "$DIM" "$*" "$RESET"; }
 section() { printf '\n%s%s▸ %s%s\n' "$BOLD" "$BLUE" "$*" "$RESET"; }
 banner()  { printf '\n%s%s════════ %s ════════%s\n' "$BOLD" "$BLUE" "$*" "$RESET"; }
-die()     { printf '\n%s✗ %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
+die()     { printf '\n%s✗ %s%s\n' "$RED" "$*" "$RESET" >&2; stopped_note; exit 1; }
+
+# The install stops a running bot first; say so whenever it ends early.
+STOPPED_SERVICE=0
+stopped_note() {
+  if ((STOPPED_SERVICE)); then
+    printf '  %s was running before and is still stopped. Start it again: sudo systemctl start %s\n' "$SERVICE" "$SERVICE" >&2
+  fi
+}
 
 on_error() {
   printf '\n%s✗ Unexpected error at line %s: %s%s\n' "$RED" "$1" "$2" "$RESET" >&2
   printf '  Run "sudo %s check" to diagnose, or "bash -x %s" to trace.\n' "$0" "$0" >&2
+  stopped_note
 }
 
 usage() { sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -202,9 +211,9 @@ user_run() {
 }
 
 # Telegram Bot API call. The token travels via curl's stdin config, not argv.
-tg_api() { # METHOD [query-string]
+tg_api() { # METHOD [query-string] [max-seconds]
   printf 'url = "https://api.telegram.org/bot%s/%s%s"\n' "$TG_TOKEN" "$1" "${2:+?$2}" |
-    curl -sS --max-time 20 -K - 2>&1 || true
+    curl -sS --max-time "${3:-20}" -K - 2>&1 || true
 }
 
 pkg_install() {
@@ -378,7 +387,8 @@ check_code() {
       ok "Modules load under Bun"
     else
       bad "Modules fail to load under Bun"
-      hint "See the error with: cd $INSTALL_DIR && sudo -u $SVC_USER $BUN src/index.ts"
+      # Never suggest `bun src/index.ts` here: that starts a second bot next to the service (409 Conflict).
+      hint "See the error with: cd $INSTALL_DIR && sudo -u $SVC_USER $BUN -e 'await import(\"./src/app/bot.ts\")'"
     fi
   fi
 
@@ -527,13 +537,39 @@ check_telegram() {
   hook=$(json_str "$(tg_api getWebhookInfo)" url)
   if [[ -n $hook ]]; then warn "A webhook is set ($hook); the bot removes it on start because it uses long polling"
   else ok "No webhook set (long polling)"; fi
-  local holders line
-  holders=$(token_holders)
-  if [[ -n $holders ]]; then
-    warn "Something else on this machine also uses this bot token (only one poller may run):"
-    while IFS= read -r line; do hint "$line"; done <<<"$holders"
+  report_local_pollers bad || true
+
+  # Only when the bot is down: a test poll next to a running bot would itself cause a 409 there.
+  local state rc=0
+  state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
+  case $state in
+    active | activating | reloading | deactivating) ;;
+    *)
+      info "$SERVICE is ${state:-not installed}: asking Telegram whether anything polls @$BOT_USERNAME (up to ${POLL_PROBE_SECS}s)…"
+      probe_pollers || rc=$?
+      case $rc in
+        0) ok "Nothing polls @$BOT_USERNAME" ;;
+        1) bad "Another client polls @$BOT_USERNAME: $PROBE_EVIDENCE" ;;
+        *) warn "Could not check: $PROBE_EVIDENCE" ;;
+      esac
+      ;;
+  esac
+}
+
+# Print local processes (as LEVEL: bad or warn) and config files using the bot token.
+# Returns 1 when a running process was found.
+report_local_pollers() {
+  local level=$1 found line
+  found=$(local_pollers)
+  if grep -q '^pid ' <<<"$found"; then
+    "$level" "Other processes on this machine use this bot token; Telegram lets only one client poll:"
+    while IFS= read -r line; do hint "$line"; done <<<"$found"
+    return 1
+  elif [[ -n $found ]]; then
+    warn "Not running, but these would compete for the bot's messages when started:"
+    while IFS= read -r line; do hint "$line"; done <<<"$found"
   else
-    ok "No other process or known config on this machine uses this bot token"
+    ok "No other process on this machine uses this bot token (environment, command line, working-directory .env)"
   fi
 }
 
@@ -597,44 +633,137 @@ service_logs() {
   else journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true; fi
 }
 
-# Local processes (other than the bot itself) and known config files that hold
-# this bot's token: the usual suspects when Telegram reports 409 Conflict.
-# The token is handed to grep through a file descriptor, never on a command line.
-token_holders() {
+# The service's log lines since this script (re)started it, so older runs can't
+# mislead the diagnosis; without a restart, the last 200 lines.
+RUN_SINCE=''
+run_logs() {
+  if [[ -n $RUN_SINCE ]]; then journalctl -q --no-pager -o cat -u "$SERVICE" --since "@$RUN_SINCE" 2>/dev/null || true
+  else journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true; fi
+}
+
+# This script and the sudo/shell chain that started it: they may carry the token in
+# their environment, but never poll. (Its own helpers share its process group.)
+own_ancestors() {
+  local pid=$$
+  while [[ -n $pid ]] && ((pid > 1)); do
+    echo "$pid"
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+  done
+}
+
+# PID → its systemd cgroup ('' when unknown): tells how the process was started.
+cgroup_of() { sed -n 's/^0:://p; s/^[0-9]*:name=systemd://p' "/proc/$1/cgroup" 2>/dev/null | head -n1 || true; }
+
+describe_cgroup() {
+  local cg=$1 x
+  case $cg in
+    */session-*.scope*) x=${cg##*/session-}; printf 'started from login session %s (a terminal or SSH shell)' "${x%%.scope*}" ;;
+    */docker-*.scope* | */docker/*) x=${cg##*docker[-/]}; printf 'Docker container %s' "${x:0:12}" ;;
+    */user@*.service/*) printf 'user systemd unit %s' "${cg##*/}" ;;
+    /system.slice/*.service*) x=${cg#/system.slice/}; printf 'systemd unit %s' "${x%%/*}" ;;
+    '') printf 'started by an unknown parent' ;;
+    *) printf 'cgroup %s' "$cg" ;;
+  esac
+}
+
+# Does /proc/PID hold the token: in its environment, its command line, or a .env in its
+# working directory (how `bun src/index.ts` and most bots read it, invisible in environ)?
+holds_token() {
+  local d=$1 comm=''
+  { IFS= read -r comm <"$d/comm"; } 2>/dev/null || true
+  case $comm in # shells and terminals carry exported variables but never poll
+    bash | sh | dash | zsh | fish | sudo | su | login | sshd | tmux* | screen | less | more | vi | vim | nano | '') return 1 ;;
+  esac
+  grep -qsaF -f <(printf '%s\n' "$TG_TOKEN") "$d/environ" "$d/cmdline" && return 0
+  [[ -f $d/cwd/.env ]] && grep -qsF -f <(printf '%s\n' "$TG_TOKEN") "$d/cwd/.env"
+}
+
+# Every process on this machine except the service ($SERVICE and its Claude sessions)
+# that uses this bot's token, one line each: pid, account, start time, how it was started,
+# working directory and command. Then known config files holding the token.
+# The token reaches grep through a file descriptor, never a command line.
+local_pollers() {
   [[ -n $TG_TOKEN ]] || return 0
-  local main skip f pid
-  main=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)
-  skip=" ${main:-0} $$ $(pgrep -P "${main:-0}" 2>/dev/null | tr '\n' ' ') "
-  for f in /proc/[0-9]*/environ /proc/[0-9]*/cmdline; do
-    pid=${f#/proc/}
-    pid=${pid%%/*}
-    [[ $skip == *" $pid "* ]] && continue
-    if grep -qaF -f <(printf '%s\n' "$TG_TOKEN") "$f" 2>/dev/null; then
-      local cmd
-      cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-      cmd=${cmd//"$TG_TOKEN"/<bot token>}
-      printf 'process %s: %s\n' "$pid" "${cmd:0:160}"
-    fi
-  done | sort -u
-  local dirs=() d
+  local mine pgid g d pid cg user start cwd cmd
+  mine=" $(own_ancestors | tr '\n' ' ') "
+  pgid=$(ps -o pgid= -p $$ | tr -d ' ')
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    [[ $mine == *" $pid "* ]] && continue
+    holds_token "$d" || continue
+    g=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    [[ -z $g || $g == "$pgid" ]] && continue # gone, or one of this script's own helpers
+    cg=$(cgroup_of "$pid")
+    [[ $cg == "/system.slice/$SERVICE.service" || $cg == "/system.slice/$SERVICE.service/"* ]] && continue
+    user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null || true)
+    cwd=$(readlink "$d/cwd" 2>/dev/null || true)
+    cmd=$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null || true)
+    cmd=${cmd//"$TG_TOKEN"/<bot token>}
+    printf 'pid %s (%s, since %s), %s, in %s: %s\n' "$pid" "${user:-?}" "${start:-?}" "$(describe_cgroup "$cg")" "${cwd:-?}" "${cmd:0:160}"
+  done
+  local dirs=()
   for d in /root/.openclaw /home/*/.openclaw /root/.claude/channels /home/*/.claude/channels; do
     if [[ -d $d ]]; then dirs+=("$d"); fi
   done
   if ((${#dirs[@]})); then
-    grep -rlsF -f <(printf '%s\n' "$TG_TOKEN") "${dirs[@]}" 2>/dev/null | sed 's/^/config file: /' || true
+    grep -rlsF -f <(printf '%s\n' "$TG_TOKEN") "${dirs[@]}" 2>/dev/null | sed 's/^/config file with this token: /' || true
   fi
 }
 
-# List token holders as hints, or say the other poller is elsewhere.
+# With tg-cc-bot stopped, does anything still poll this bot? Telegram ends a waiting
+# getUpdates with 409 as soon as another client asks for updates, and pollers ask again
+# at least every ~30 s, so holding one open for POLL_PROBE_SECS either catches a second
+# poller or rules one out. No offset is sent, so no message is consumed here.
+# Returns 0 (nothing else polls), 1 (something does; PROBE_EVIDENCE says how we know)
+# or 2 (Telegram did not answer).
+POLL_PROBE_SECS=40
+PROBE_EVIDENCE=''
+probe_pollers() {
+  local start=$SECONDS left body first='' now
+  while :; do
+    left=$((POLL_PROBE_SECS - (SECONDS - start)))
+    ((left > 0)) || return 0
+    body=$(tg_api getUpdates "timeout=$left&limit=1" $((left + 15)))
+    case $body in
+      *'"error_code":409'*webhook*)
+        PROBE_EVIDENCE="a webhook is set for this bot, so Telegram sends its messages there instead"
+        return 1
+        ;;
+      *'"error_code":409'*)
+        PROBE_EVIDENCE="Telegram cut off a test request after $((SECONDS - start))s with 409 Conflict: another client asked for this bot's updates while $SERVICE was stopped"
+        return 1
+        ;;
+      *'"ok":true,"result":[]'*) ;;
+      *'"ok":true'*)
+        # Messages are waiting. Another poller would take and confirm them within seconds.
+        now=$(grep -o '"update_id":[0-9]*' <<<"$body" | head -n1 | cut -d: -f2)
+        if [[ -z $first ]]; then
+          first=$now
+        elif [[ $now != "$first" ]]; then
+          PROBE_EVIDENCE="another client received and confirmed update $first while $SERVICE was stopped"
+          return 1
+        fi
+        sleep 2
+        ;;
+      *)
+        PROBE_EVIDENCE="Telegram did not answer the test request: ${body:0:160}"
+        return 2
+        ;;
+    esac
+  done
+}
+
+# After a 409 in the bot's log: name local processes using the token, if any.
 explain_conflict() {
-  local holders line
-  holders=$(token_holders)
-  if [[ -n $holders ]]; then
-    hint "Also using this bot token on this machine; stop it (or give this bot its own token):"
-    while IFS= read -r line; do hint "  $line"; done <<<"$holders"
+  local found line
+  found=$(local_pollers)
+  if [[ -n $found ]]; then
+    hint "These use the same bot token on this machine (only one client may poll):"
+    while IFS= read -r line; do hint "  $line"; done <<<"$found"
   else
-    hint "Nothing else on this machine holds the token, so the other poller runs elsewhere"
-    hint "(another server, your laptop, OpenClaw…). Stop it, or create a separate bot for tg-cc-bot in @BotFather"
+    hint "No other process here has the token in its environment, command line or working-directory .env"
+    hint "Run \`sudo $0 install\` again: it stops $SERVICE first and asks Telegram whether anything else still polls"
   fi
 }
 
@@ -642,9 +771,12 @@ explain_conflict() {
 explain_logs() {
   local logs=$1
   if [[ $logs == *"401: Unauthorized"* ]]; then hint "Telegram rejected the bot token: update TELEGRAM_BOT_TOKEN"; fi
-  if [[ $logs == *"409: Conflict"* ]]; then
-    hint "Another process polls this bot token (Telegram allows only one)"
+  if [[ $logs == *"409: Conflict"* || $logs == *"409 Conflict"* ]]; then
+    hint "Telegram answered 409 Conflict: another client asked for this bot's updates at the same time"
     explain_conflict
+  fi
+  if [[ $logs == *"already polls this bot on this machine"* ]]; then
+    hint "A second copy of tg-cc-bot runs on this machine (its pid is in the log line); stop it: only one may poll"
   fi
   if [[ $logs == *"is required"* ]]; then hint "A required setting is missing in $ENV_FILE"; fi
   if [[ $logs == *"warm-up failed"* ]]; then hint "Claude Code could not start: see the Application and Claude sign-in checks"; fi
@@ -675,21 +807,21 @@ check_service() {
   since=$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE" 2>/dev/null || true)
   logs=$(service_logs)
   if [[ $state == active ]]; then
-    ok "Running since ${since:-unknown}"
+    ok "Running since ${since:-unknown} (pid $(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo ?))"
   else
     bad "Service is ${state:-unknown}"
-    explain_logs "$(journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true)"
+    explain_logs "$(run_logs)"
     hint "Logs: journalctl -u $SERVICE -n 50"
     return 0
   fi
 
   if ((restarts > 0)); then
     warn "Restarted $restarts time(s) since the unit was started"
-    explain_logs "$(journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true)"
+    explain_logs "$(run_logs)"
   fi
 
-  if grep -q '409: Conflict' <<<"$logs"; then
-    bad "Telegram reports 409 Conflict: another process polls this bot token, so the two steal each other's messages"
+  if grep -qE '409:? Conflict' <<<"$logs"; then
+    bad "Telegram answered 409 Conflict in this run: another client polls this bot token, so the two split its messages"
     explain_conflict
   fi
 
@@ -819,6 +951,7 @@ prereq_fail() {
   printf '     claude          # sign in with /login (over SSH: open the link on any device, paste the code back)\n'
   printf '\n  %sHeadless alternative:%s run `claude setup-token` anywhere, then\n' "$BOLD" "$RESET"
   printf '     sudo CLAUDE_CODE_OAUTH_TOKEN=<token> bash %s\n\n' "$SCRIPT_DIR/deploy.sh"
+  stopped_note
   exit 1
 }
 
@@ -1054,7 +1187,9 @@ EOF
   systemctl daemon-reload
   systemctl enable --quiet "$SERVICE"
   systemctl reset-failed "$SERVICE" 2>/dev/null || true
+  RUN_SINCE=$(date +%s)
   systemctl restart "$SERVICE"
+  STOPPED_SERVICE=0
   ok "Service (re)started"
   wait_ready 90
 }
@@ -1067,30 +1202,102 @@ wait_ready() {
     restarts=$(systemctl show -p NRestarts --value "$SERVICE" 2>/dev/null || true)
     if ! systemctl is-active --quiet "$SERVICE" || [[ ${restarts:-0} != 0 ]]; then
       bad "Service failed to start"
-      journalctl -q --no-pager -o cat -u "$SERVICE" -n 15 2>/dev/null | sed 's/^/      /' || true
-      explain_logs "$(journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true)"
+      run_logs | tail -n 15 | sed 's/^/      /' || true
+      explain_logs "$(run_logs)"
       return 0
     fi
     logs=$(service_logs)
+    if grep -qE '409:? Conflict' <<<"$logs"; then
+      bad "Telegram answered 409 Conflict right after the start: another client polls this bot"
+      explain_conflict
+      return 0
+    fi
     if grep -q ' polling ' <<<"$logs" && grep -qE 'Claude Code ready|warm-up failed' <<<"$logs"; then
-      ok "Bot is up"
+      ok "Bot is up: $(grep ' polling ' <<<"$logs" | tail -n1)"
       return 0
     fi
   done
   warn "Bot did not report ready within $1s (it may still be starting)"
 }
 
+# Stop the bot before anything else: until the new version starts, nothing of this
+# install talks to Telegram, so a reply that arrives meanwhile cannot come from it.
+# "activating" covers a unit waiting to auto-restart after a crash.
 stop_service_if_running() {
-  # "activating" covers a unit waiting to auto-restart after a crash: it would start polling again
-  # in the middle of the install (and clash with the script's own getUpdates when detecting your ID).
-  local state
+  local state pid since
   state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
   case $state in
     active | activating | reloading | deactivating)
+      pid=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)
+      since=$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE" 2>/dev/null || true)
       systemctl stop "$SERVICE"
-      info "Stopped $SERVICE ($state) for the upgrade"
+      STOPPED_SERVICE=1
+      [[ $pid == 0 ]] && pid=''
+      info "Stopped the running $SERVICE ($state${pid:+, pid $pid}${since:+, up since $since}); it starts again at the end"
       ;;
   esac
+}
+
+# Before the service starts: make sure it will be the only client polling the bot.
+step_single_poller() {
+  section "Telegram polling"
+  [[ -n $TG_TOKEN ]] || return 0
+  if [[ -z $BOT_USERNAME ]]; then BOT_USERNAME=$(json_str "$(tg_api getMe)" username); fi
+  local bot="@${BOT_USERNAME:-bot}" hook
+  hook=$(json_str "$(tg_api getWebhookInfo)" url)
+  if [[ -n $hook ]]; then
+    warn "A webhook is set for $bot ($hook): Telegram delivers its messages there, so polling gets none"
+    confirm "Remove the webhook so $SERVICE receives the messages?" y || die "Remove the webhook or use another bot token, then re-run"
+    tg_api deleteWebhook >/dev/null
+    ok "Webhook removed"
+  fi
+
+  if ! report_local_pollers bad; then
+    stop_local_pollers "$(local_pollers)" || die "Not started: stop the processes above (or give $SERVICE its own bot token), then re-run"
+  fi
+
+  info "Asking Telegram whether anything else polls $bot while $SERVICE is stopped (up to ${POLL_PROBE_SECS}s)…"
+  local rc=0
+  probe_pollers || rc=$?
+  case $rc in
+    0) ok "Nothing else polled $bot in ${POLL_PROBE_SECS}s" ;;
+    1)
+      bad "Another client polls $bot: $PROBE_EVIDENCE"
+      hint "It is none of this machine's processes with the token in their environment, command line or working-directory .env"
+      hint "Stop it wherever it runs, or create a separate bot for $SERVICE in @BotFather"
+      confirm "Start $SERVICE anyway (the two will split $bot's messages)?" n || die "Not started: another client polls $bot"
+      ;;
+    *) warn "Could not check: $PROBE_EVIDENCE" ;;
+  esac
+}
+
+# Offer to stop local processes that use the bot token (from local_pollers).
+# Returns 1 when any remain.
+stop_local_pollers() {
+  local line pid pids=() managed=0
+  while IFS= read -r line; do
+    [[ $line == 'pid '* ]] || continue
+    pid=${line#pid }
+    pid=${pid%% *}
+    case $line in
+      *', systemd unit '* | *', user systemd unit '* | *', Docker container '*) managed=1 ;;
+      *) pids+=("$pid") ;;
+    esac
+  done <<<"$1"
+  if ((managed)); then
+    hint "Stop the ones run by systemd or Docker with systemctl stop / docker stop, or they come back"
+    return 1
+  fi
+  ((${#pids[@]})) || return 0
+  if ! is_interactive || ! confirm "Stop pid ${pids[*]} now?" y; then return 1; fi
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "${pids[@]}" 2>/dev/null || break
+    sleep 1
+  done
+  kill -KILL "${pids[@]}" 2>/dev/null || true
+  ok "Stopped pid ${pids[*]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1108,11 +1315,12 @@ cmd_install() {
   printf '%sInstalling tg-cc-bot%s → %s (user %s, service %s)\n' "$BOLD" "$RESET" "$INSTALL_DIR" "$SVC_USER" "$SERVICE"
   resolve_paths
   step_preflight
-  step_prerequisites
   stop_service_if_running
+  step_prerequisites
   step_bun
   step_code
   step_config
+  step_single_poller
   step_service
   self_check
 }
@@ -1124,6 +1332,7 @@ cmd_update() {
   stop_service_if_running
   step_bun
   step_code
+  step_single_poller
   step_service
   self_check
 }
