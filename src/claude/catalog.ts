@@ -3,7 +3,7 @@ import type { ModelInfo, SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import { silentLogger, type Logger } from "../core/logger.ts";
 import type { PermissionMode } from "../core/types.ts";
 import { toTelegramName } from "./cmdnames.ts";
-import type { ProcessFactory } from "./process.ts";
+import type { ProcessFactory, ProcessHandle } from "./process.ts";
 
 /**
  * What Claude Code offers: slash commands (built-ins, skills, plugins) and
@@ -15,6 +15,8 @@ export class CommandCatalog {
   models: ModelInfo[] = [];
   version: string | undefined;
   private listeners = new Set<() => void>();
+  /** Names seen in single chats (project skills…): resolvable, but not in the menu. */
+  private learned = new Set<string>();
 
   get commandNames(): string[] {
     return this.commands.map((c) => c.name);
@@ -22,10 +24,15 @@ export class CommandCatalog {
 
   /** Map what the user typed (original or Telegram-menu spelling) to a Claude command name. */
   resolve(typed: string): string | undefined {
-    const names = this.commandNames;
+    const names = [...this.commandNames, ...this.learned];
     if (names.includes(typed)) return typed;
     const lower = typed.toLowerCase();
     return names.find((n) => toTelegramName(n) === lower);
+  }
+
+  /** Remember command names a chat's session reported, so their menu spelling resolves too. */
+  learn(names: Iterable<string>): void {
+    for (const n of names) this.learned.add(n);
   }
 
   update(next: { commands?: SlashCommand[]; models?: ModelInfo[]; version?: string }): void {
@@ -45,24 +52,35 @@ export class CommandCatalog {
     return () => this.listeners.delete(fn);
   }
 
-  /**
-   * Start a throwaway process in `cwd` just to read commands and models. No
-   * message is sent, so no transcript is written.
-   */
+  /** Read commands and models once from a throwaway process in `cwd`. */
   async probe(factory: ProcessFactory, cwd: string, permissionMode: PermissionMode, log: Logger = silentLogger): Promise<void> {
-    const handle = factory.create(
-      { sessionId: randomUUID(), resume: false, cwd, permissionMode },
-      {
-        canUseTool: async () => ({ behavior: "deny", message: "probe" }),
-        onMessage: async () => {},
-        onExit: () => {},
-      },
-    );
-    try {
-      await handle.start();
-      this.update({ commands: handle.commands, models: handle.models });
-    } finally {
-      await handle.close().catch((err) => log.warn("closing probe failed:", err));
-    }
+    await withProbe(factory, cwd, permissionMode, async (h) => this.update({ commands: h.commands, models: h.models }), log);
+  }
+}
+
+/**
+ * Run `fn` against a throwaway Claude Code process in `cwd`, then close it. No
+ * message is sent, so no transcript is written; it takes no pool slot.
+ */
+export async function withProbe<T>(
+  factory: ProcessFactory,
+  cwd: string,
+  permissionMode: PermissionMode,
+  fn: (handle: ProcessHandle) => Promise<T>,
+  log: Logger = silentLogger,
+): Promise<T> {
+  const handle = factory.create(
+    { sessionId: randomUUID(), resume: false, cwd, permissionMode },
+    {
+      canUseTool: async () => ({ behavior: "deny", message: "probe" }),
+      onMessage: async () => {},
+      onExit: () => {},
+    },
+  );
+  try {
+    await handle.start();
+    return await fn(handle);
+  } finally {
+    await handle.close().catch((err) => log.warn("closing probe failed:", err));
   }
 }

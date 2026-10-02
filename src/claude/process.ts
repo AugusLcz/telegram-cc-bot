@@ -1,6 +1,8 @@
 import {
   query,
+  type AgentInfo,
   type CanUseTool,
+  type McpServerStatus,
   type ModelInfo,
   type Query,
   type SDKControlGetContextUsageResponse,
@@ -34,6 +36,15 @@ export interface ProcessHooks {
   onExit(error?: unknown): void;
 }
 
+/** A live background task of a session (a shell, a subagent, a monitor…). */
+export interface TaskInfo {
+  id: string;
+  type: string;
+  description: string;
+  /** When this process first reported it. */
+  since: number;
+}
+
 /** A running Claude Code process serving exactly one session. */
 export interface ProcessHandle {
   /** Current session ID; follows conversation resets (/clear). */
@@ -42,6 +53,7 @@ export interface ProcessHandle {
   readonly turnActive: boolean;
   /** Live non-ambient background tasks (shells, subagents, monitors). */
   readonly backgroundTasks: number;
+  readonly tasks: readonly TaskInfo[];
   readonly commands: SlashCommand[];
   readonly models: ModelInfo[];
   start(): Promise<void>;
@@ -51,6 +63,15 @@ export interface ProcessHandle {
   setPermissionMode(mode: PermissionMode): Promise<void>;
   setEffort(effort: Effort | undefined): Promise<void>;
   contextUsage(): Promise<ContextUsage | null>;
+  /** Slash commands and skills as Claude Code sees them now (asked afresh). */
+  supportedCommands(): Promise<SlashCommand[]>;
+  supportedAgents(): Promise<AgentInfo[]>;
+  mcpServerStatus(): Promise<McpServerStatus[]>;
+  toggleMcpServer(name: string, enabled: boolean): Promise<void>;
+  reconnectMcpServer(name: string): Promise<void>;
+  /** Load plugin changes made on disk (install, enable…) into this session. */
+  reloadPlugins(): Promise<void>;
+  stopTask(id: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -88,6 +109,21 @@ export const SESSION_FLAG_SETTINGS = {
   enabledPlugins: { "telegram@claude-plugins-official": false },
 };
 
+/**
+ * The live, non-ambient tasks of a background_tasks_changed snapshot, keeping
+ * when each was first seen.
+ */
+export function trackTasks(
+  previous: readonly TaskInfo[],
+  snapshot: readonly { task_id: string; task_type: string; description: string; ambient?: boolean }[],
+  now = Date.now(),
+): TaskInfo[] {
+  const since = new Map(previous.map((t) => [t.id, t.since]));
+  return snapshot
+    .filter((t) => !t.ambient)
+    .map((t) => ({ id: t.task_id, type: t.task_type, description: t.description, since: since.get(t.task_id) ?? now }));
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout;
   return Promise.race([
@@ -102,7 +138,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
 export class SdkProcess implements ProcessHandle {
   sessionId: string;
   turnActive = false;
-  backgroundTasks = 0;
+  tasks: TaskInfo[] = [];
   commands: SlashCommand[] = [];
   models: ModelInfo[] = [];
 
@@ -180,7 +216,7 @@ export class SdkProcess implements ProcessHandle {
       this.input?.close();
       this.input = null;
       this.turnActive = false;
-      this.backgroundTasks = 0;
+      this.tasks = [];
       if (unexpected) this.hooks.onExit(failure ?? new Error("Claude Code exited"));
     }
   }
@@ -193,7 +229,7 @@ export class SdkProcess implements ProcessHandle {
       } else if (msg.subtype === "commands_changed") {
         this.commands = msg.commands;
       } else if (msg.subtype === "background_tasks_changed") {
-        this.backgroundTasks = msg.tasks.filter((t) => !t.ambient).length;
+        this.tasks = trackTasks(this.tasks, msg.tasks);
       }
     } else if (msg.type === "conversation_reset") {
       this.sessionId = msg.new_conversation_id;
@@ -224,8 +260,46 @@ export class SdkProcess implements ProcessHandle {
     await this.q?.applyFlagSettings({ effortLevel: effort ?? null });
   }
 
+  get backgroundTasks(): number {
+    return this.tasks.length;
+  }
+
   async contextUsage(): Promise<ContextUsage | null> {
     return this.q ? this.q.getContextUsage() : null;
+  }
+
+  private running(): Query {
+    if (!this.q) throw new Error("Claude Code process is not running");
+    return this.q;
+  }
+
+  async supportedCommands(): Promise<SlashCommand[]> {
+    this.commands = await this.running().supportedCommands();
+    return this.commands;
+  }
+
+  supportedAgents(): Promise<AgentInfo[]> {
+    return this.running().supportedAgents();
+  }
+
+  mcpServerStatus(): Promise<McpServerStatus[]> {
+    return this.running().mcpServerStatus();
+  }
+
+  toggleMcpServer(name: string, enabled: boolean): Promise<void> {
+    return this.running().toggleMcpServer(name, enabled);
+  }
+
+  reconnectMcpServer(name: string): Promise<void> {
+    return this.running().reconnectMcpServer(name);
+  }
+
+  async reloadPlugins(): Promise<void> {
+    await this.running().reloadPlugins();
+  }
+
+  stopTask(id: string): Promise<void> {
+    return this.running().stopTask(id);
   }
 
   async close(): Promise<void> {

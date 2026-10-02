@@ -1,11 +1,13 @@
-import type { ModelInfo, SDKMessage, SlashCommand } from "@anthropic-ai/claude-agent-sdk";
-import type {
-  ContextUsage,
-  ProcessFactory,
-  ProcessHandle,
-  ProcessHooks,
-  ProcessSpec,
-  UserContent,
+import type { AgentInfo, McpServerStatus, ModelInfo, SDKMessage, SlashCommand } from "@anthropic-ai/claude-agent-sdk";
+import {
+  trackTasks,
+  type ContextUsage,
+  type ProcessFactory,
+  type ProcessHandle,
+  type ProcessHooks,
+  type ProcessSpec,
+  type TaskInfo,
+  type UserContent,
 } from "../../src/claude/process.ts";
 import type { Effort, PermissionMode } from "../../src/core/types.ts";
 
@@ -13,8 +15,12 @@ import type { Effort, PermissionMode } from "../../src/core/types.ts";
 export class FakeProcess implements ProcessHandle {
   sessionId: string;
   turnActive = false;
-  backgroundTasks = 0;
-  commands: SlashCommand[] = [{ name: "compact", description: "Compact", argumentHint: "" }];
+  tasks: TaskInfo[] = [];
+  commands: SlashCommand[] = [{ name: "compact", description: "Compact", argumentHint: "", builtin: true }];
+  agents: AgentInfo[] = [];
+  mcp: McpServerStatus[] = [];
+  /** Control calls in order, e.g. "toggle:github:false". */
+  controls: string[] = [];
   models: ModelInfo[] = [{ value: "sonnet", displayName: "Sonnet", description: "Sonnet model" }];
   started = false;
   closed = false;
@@ -71,6 +77,33 @@ export class FakeProcess implements ProcessHandle {
   async contextUsage(): Promise<ContextUsage | null> {
     return { percentage: 12, totalTokens: 24000, maxTokens: 200000 } as ContextUsage;
   }
+  get backgroundTasks(): number {
+    return this.tasks.length;
+  }
+  async supportedCommands(): Promise<SlashCommand[]> {
+    return this.commands;
+  }
+  async supportedAgents(): Promise<AgentInfo[]> {
+    return this.agents;
+  }
+  async mcpServerStatus(): Promise<McpServerStatus[]> {
+    return this.mcp;
+  }
+  async toggleMcpServer(name: string, enabled: boolean): Promise<void> {
+    this.controls.push(`toggle:${name}:${enabled}`);
+    const s = this.mcp.find((m) => m.name === name);
+    if (s) s.status = enabled ? "connected" : "disabled";
+  }
+  async reconnectMcpServer(name: string): Promise<void> {
+    this.controls.push(`reconnect:${name}`);
+  }
+  async reloadPlugins(): Promise<void> {
+    this.controls.push("reloadPlugins");
+  }
+  async stopTask(id: string): Promise<void> {
+    this.controls.push(`stopTask:${id}`);
+    this.tasks = this.tasks.filter((t) => t.id !== id);
+  }
   async close(): Promise<void> {
     this.closed = true;
   }
@@ -79,11 +112,14 @@ export class FakeProcess implements ProcessHandle {
 
   /** Deliver an SDK message the way SdkProcess does (state first, then hooks). */
   async emit(msg: Record<string, unknown>): Promise<void> {
-    const m = msg as { type: string; subtype?: string; tasks?: { ambient?: boolean }[]; new_conversation_id?: string };
+    const m = msg as {
+      type: string;
+      subtype?: string;
+      tasks?: { task_id: string; task_type: string; description: string; ambient?: boolean }[];
+      new_conversation_id?: string;
+    };
     if (m.type === "system" && m.subtype === "init") this.turnActive = true;
-    if (m.type === "system" && m.subtype === "background_tasks_changed") {
-      this.backgroundTasks = (m.tasks ?? []).filter((t) => !t.ambient).length;
-    }
+    if (m.type === "system" && m.subtype === "background_tasks_changed") this.tasks = trackTasks(this.tasks, m.tasks ?? []);
     if (m.type === "conversation_reset" && m.new_conversation_id) this.sessionId = m.new_conversation_id;
     if (m.type === "result") this.turnActive = false;
     await this.hooks.onMessage({ session_id: this.sessionId, uuid: "u", ...msg } as unknown as SDKMessage);
@@ -106,10 +142,13 @@ export class FakeFactory implements ProcessFactory {
   startDelayMs = 0;
   failNextStart: Error | null = null;
   onSend?: (p: FakeProcess, content: UserContent) => void;
+  /** Script a process (commands, agents, MCP servers…) as soon as it is created. */
+  onCreate?: (p: FakeProcess) => void;
 
   create(spec: ProcessSpec, hooks: ProcessHooks): ProcessHandle {
     const p = new FakeProcess(spec, hooks, this);
     this.created.push(p);
+    this.onCreate?.(p);
     return p;
   }
 

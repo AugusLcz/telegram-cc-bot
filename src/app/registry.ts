@@ -26,25 +26,32 @@ export interface CommandDef<A> {
   usage?: string;
   /** Not listed in /help or the menu (aliases such as /start). */
   hidden?: boolean;
+  /** Other names that run this command; never listed. */
+  aliases?: string[];
   run(app: A, input: CommandInput): Promise<void>;
 }
 
 /** Bot commands: handled mechanically, without Claude. Everything else goes to Claude Code. */
 export class CommandRegistry<A> {
   private readonly defs = new Map<string, CommandDef<A>>();
+  private readonly aliases = new Map<string, CommandDef<A>>();
 
   register(def: CommandDef<A>): this {
-    if (this.defs.has(def.name)) throw new Error(`command /${def.name} registered twice`);
+    for (const name of [def.name, ...(def.aliases ?? [])]) {
+      if (this.defs.has(name) || this.aliases.has(name)) throw new Error(`command /${name} registered twice`);
+    }
     this.defs.set(def.name, def);
+    for (const alias of def.aliases ?? []) this.aliases.set(alias, def);
     return this;
   }
 
   get(name: string): CommandDef<A> | undefined {
-    return this.defs.get(name);
+    return this.defs.get(name) ?? this.aliases.get(name);
   }
 
+  /** Every name the bot answers to, aliases included. */
   names(): Set<string> {
-    return new Set(this.defs.keys());
+    return new Set([...this.defs.keys(), ...this.aliases.keys()]);
   }
 
   /** Listed commands, in registration order, optionally of one group. */

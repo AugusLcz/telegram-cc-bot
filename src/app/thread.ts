@@ -112,7 +112,7 @@ export function passThrough(app: App, key: ThreadKey, name: string, args: string
 type ChatRun = (app: App, input: CommandInput, key: ThreadKey) => Promise<void>;
 
 /** A command acting on this chat's session (only meaningful inside a chat). */
-function chatCommand(def: Omit<CommandDef<App>, "run" | "group"> & { run: ChatRun }): CommandDef<App> {
+export function chatCommand(def: Omit<CommandDef<App>, "run" | "group"> & { run: ChatRun }): CommandDef<App> {
   return {
     ...def,
     group: "chat",
@@ -213,7 +213,8 @@ const del: ChatRun = async (app, { ctx }, key) => {
 
 // ---- callbacks -----------------------------------------------------------------
 
-function chatKey(ctx: Context): ThreadKey {
+/** The chat a button was pressed in. */
+export function chatKey(ctx: Context): ThreadKey {
   const t = targetOf(ctx);
   if (!t?.threadId) throw new UserError(NO_CHAT_HINT);
   return `${t.chatId}:${t.threadId}`;
@@ -232,7 +233,7 @@ export function registerThread(app: App): void {
     .register(chatCommand({ name: "effort", usage: "[level]", description: "Effort for this chat", run: effort }))
     .register(chatCommand({ name: "verbose", description: "Toggle tool output for this chat", run: verbose }))
     .register(chatCommand({ name: "rename", usage: "<title>", description: "Rename this chat and its session", run: rename }))
-    .register(chatCommand({ name: "fork", description: "Copy this session into a new chat", run: fork }))
+    .register(chatCommand({ name: "fork", aliases: ["branch"], description: "Copy this session into a new chat", run: fork }))
     .register(chatCommand({ name: "close", description: "Hibernate now (resumes on next message)", run: close }))
     .register(chatCommand({ name: "delete", description: "Delete this chat (session stays resumable)", run: del }));
 

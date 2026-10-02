@@ -2,11 +2,12 @@ import { sequentialize } from "@grammyjs/runner";
 import type { Bot, Context, NextFunction } from "grammy";
 import type { BotCommandScope } from "grammy/types";
 import { CommandCatalog } from "../claude/catalog.ts";
-import { CommandNameMap, parseCommand } from "../claude/cmdnames.ts";
+import { CommandNameMap, commandKind, parseCommand } from "../claude/cmdnames.ts";
 import { SessionPool } from "../claude/pool.ts";
 import type { ProcessFactory } from "../claude/process.ts";
 import type { SessionApi } from "../claude/sessions.ts";
 import type { Config } from "../core/config.ts";
+import { runProgram, type Exec } from "../core/exec.ts";
 import type { Logger } from "../core/logger.ts";
 import { targetOfKey, type ThreadKey } from "../core/types.ts";
 import { AccessControl } from "../domain/access.ts";
@@ -23,6 +24,7 @@ import { keyOf, sequenceKey, targetOf } from "../telegram/target.ts";
 import { titleFromPrompt, TelegramTopics } from "../telegram/topics.ts";
 import { RendererRegistry, type App, type BotInfo } from "./context.ts";
 import { registerControl } from "./control.ts";
+import { registerInspect } from "./inspect.ts";
 import { CallbackRouter, CommandRegistry } from "./registry.ts";
 import { handleThreadInput, passThrough, registerThread } from "./thread.ts";
 import { NO_CHAT_HINT, reply, replyTo, THREADED_MODE_HINT } from "./views.ts";
@@ -35,6 +37,8 @@ export interface CreateAppOptions {
   store: Store;
   sessions: SessionApi;
   log: Logger;
+  /** Defaults to running the program for real. */
+  exec?: Exec;
 }
 
 /** Build every service, wire the pool to Telegram and install the update handlers on `bot`. */
@@ -61,6 +65,7 @@ export function createApp(opts: CreateAppOptions): App {
       onMessage: async (key, msg) => {
         if (msg.type === "system" && msg.subtype === "init") {
           app.catalog.update({ version: msg.claude_code_version });
+          app.catalog.learn(msg.slash_commands ?? []);
           const record = app.threads.get(key);
           if (record?.permissionMode === "auto" && msg.permissionMode !== "auto") {
             // Auto mode is not available for this account or model: fall back, and say so once.
@@ -134,7 +139,9 @@ export function createApp(opts: CreateAppOptions): App {
     projects,
     threads,
     pool,
+    factory: opts.factory,
     sessions: opts.sessions,
+    exec: opts.exec ?? runProgram,
     catalog,
     names: new CommandNameMap(),
     broker,
@@ -156,6 +163,7 @@ export function createApp(opts: CreateAppOptions): App {
 
   registerControl(app);
   registerThread(app);
+  registerInspect(app);
   installHandlers(app, bot);
   return app;
 }
@@ -259,17 +267,21 @@ async function errorBoundary(app: App, ctx: Context, next: NextFunction): Promis
 }
 
 /**
- * The chat menu Telegram shows after "/": the bot's commands plus Claude
- * Code's, mapped to Telegram's naming rules (at most 100). It is set for every
- * scope a private chat can see: default, all private chats, and each allowed
- * user's chat, which outranks the others, so a menu another program set for this
- * bot can't hide it. If Telegram rejects the full list, the bot's own still go in.
+ * The chat menu Telegram shows after "/": commands only. First the bot's, then
+ * Claude Code's own commands that are useful here (/compact, /context …),
+ * mapped to Telegram's naming rules. Skills stay out of it: /skills lists them,
+ * and typing one still works. It is set for every scope a private chat can
+ * see: default, all private chats, and each allowed user's chat, which outranks
+ * the others, so a menu another program set for this bot can't hide it. If
+ * Telegram rejects the full list, the bot's own still go in.
  */
 export async function syncMenu(app: App): Promise<void> {
   const own = app.commands.menu();
-  const pairs = app.names.rebuild(app.catalog.commandNames, app.commands.names());
+  const botNames = app.commands.names();
+  const pairs = app.names.rebuild(app.catalog.commandNames, botNames);
+  const listed = new Set(app.catalog.commands.filter((c) => commandKind(c, botNames) === "menu").map((c) => c.name));
   const descriptions = new Map(app.catalog.commands.map((c) => [c.name, c.description]));
-  const claude = pairs.map(([command, name]) => ({
+  const claude = pairs.filter(([, name]) => listed.has(name)).map(([command, name]) => ({
     command,
     description: truncate((descriptions.get(name) || name).replace(/\s+/g, " ").trim() || name, 256),
   }));

@@ -69,9 +69,18 @@ All bot commands work in every chat and don't involve Claude.
 | `/model [name]` · `/mode [mode]` · `/effort [level]` | Show (buttons) or change this chat's model, permission mode or effort; also before the first message |
 | `/verbose` | Toggle tool output and timings for this chat |
 | `/rename <title>` | Rename this chat and its session |
-| `/fork` | Copy this session into a new chat |
+| `/fork` (`/branch`) | Copy this session into a new chat |
 | `/close` | Stop this chat's process now; your next message resumes it |
 | `/delete` | Delete the chat and its messages after confirmation (the session stays resumable) |
+| `/plan [task]` | Switch this chat to plan mode; with a task, send it right away |
+| `/skills` | Skills you can run here: yours (user, project, plugins) first, then Claude Code's; tap one to run it |
+| `/agents` | Subagents Claude can use here |
+| `/mcp [reconnect\|enable\|disable <server\|all>]` | This session's MCP servers and their state, with Reconnect / Enable / Disable buttons |
+| `/tasks` (`/bashes`) | Background tasks of this session (shells, subagents…), with Stop buttons |
+| `/diff` | `git status` and diff summary of the chat's directory; the full diff arrives as a `.patch` file |
+| `/export` | This conversation as a Markdown file |
+| `/memory [n]` | The CLAUDE.md / AGENTS.md files a session here loads; `/memory n` sends one |
+| `/permissions` · `/hooks` | Permission rules and hooks from the managed, user, project and local settings files |
 
 ### Bot
 
@@ -85,12 +94,13 @@ All bot commands work in every chat and don't involve Claude.
 | `/project add <name> <path>` | Register a project directory (must exist and be inside `ALLOWED_ROOTS` if set) and make it active |
 | `/project use <name>` · `/project rm <name>` | Switch the active project (also moves this chat if it hasn't talked to Claude yet) · remove one |
 | `/settings` | Defaults for new chats: model, permission mode, effort, verbose |
+| `/plugin [list\|install\|uninstall\|enable\|disable\|update\|marketplace …]` | Manage Claude Code plugins with the `claude plugin` CLI; the chat's session reloads them |
 
 There is no `/new`: go back to the bot's main screen and type to start a new chat.
 
-Every other slash command goes to Claude Code unchanged: `/compact`, `/context`, `/usage`, `/clear`, `/init`, `/config key=value`, `/output-style`, `/code-review`, and all your skills and plugin commands, with arguments.
+Every other slash command goes to Claude Code unchanged: `/compact`, `/context`, `/usage`, `/clear`, `/init`, `/config key=value`, `/output-style`, `/reload-skills`, `/code-review`, and all your skills and plugin commands, with arguments. Claude Code's terminal-only screens (`/theme`, `/login`, `/ide`…) do nothing over Telegram; the commands above replace the useful ones.
 
-Telegram menu names must match `[a-z0-9_]`, so `code-review` appears as `/code_review` and `plugin:skill` as `/plugin_skill`. Either spelling works.
+The `/` menu lists commands only: the bot's, then Claude Code's useful ones (`/compact`, `/context`, `/usage`, `/clear`…). Skills stay out of it; `/skills` lists them and typing one runs it. Telegram names must match `[a-z0-9_]`, so `code-review` is `/code_review` and `plugin:skill` is `/plugin_skill`; either spelling works.
 
 ## Sessions and processes
 

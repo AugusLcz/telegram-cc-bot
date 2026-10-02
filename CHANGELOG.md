@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-02
+
+### Added
+
+- Telegram versions of Claude Code's terminal-only screens:
+  - **`/skills`:** skills you can run in the chat; yours first, tappable.
+  - **`/agents`:** the chat's subagents.
+  - **`/mcp`:** the session's MCP servers, with Reconnect / Enable / Disable buttons and
+    `/mcp reconnect|enable|disable <server|all>`.
+  - **`/tasks` (`/bashes`):** background tasks, with Stop buttons.
+  - **`/diff`:** git status and summary; the full patch as a file.
+  - **`/export`:** the conversation as Markdown.
+  - **`/plan [task]`:** switches the chat to plan mode, optionally with a task.
+  - **`/branch`:** an alias of `/fork`.
+  - **`/memory`:** loaded CLAUDE.md / AGENTS.md files.
+  - **`/permissions` and `/hooks`:** read from the settings files.
+  - **`/plugin`:** list, install, uninstall, enable, disable, update and marketplaces, through the
+    `claude plugin` CLI; the chat's session reloads the plugins.
+- `/skills` and `/agents` in a chat without a running session ask a short-lived Claude Code process in
+  the chat's directory. It sends no message, writes no transcript and takes no slot.
+
+### Changed
+
+- The `/` menu lists commands only: the bot's, then Claude Code's useful headless ones. Skills are
+  no longer in it; `/skills` lists them, and typing one runs it. A skill seen in a chat's session
+  (even a project-only one) also resolves by its menu spelling.
+- `/help` lists Claude Code's menu commands and points to `/skills`.
+
 ## [0.2.2] - 2026-10-02
 
 ### Changed
@@ -131,7 +159,8 @@ First release.
   real Bot API spike script (`scripts/topics-spike.ts`).
 - Architecture document, English and Chinese READMEs, 66 tests.
 
-[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.1.0...v0.2.0

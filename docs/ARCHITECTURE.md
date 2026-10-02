@@ -481,3 +481,43 @@ Risks:
 - **Agent SDK billing** for subscription users may change (a separate SDK credit was announced, then
   paused).
 - Scheduled wake-ups inside a session (`/loop`, cron tools) do not survive hibernation.
+
+## Claude Code commands over Telegram
+
+Claude Code's built-in commands come in three kinds:
+- `prompt` commands, which send a prompt;
+- `local` commands, which print text and, when marked `supportsNonInteractive`, also run headless
+  (under the SDK);
+- `local-jsx` terminal screens.
+
+Only the first two work over the SDK. The bot sorts the commands a session reports
+(`supportedCommands()`, whose `builtin` flag separates Claude Code's own from user, project, plugin
+and MCP ones) into four groups, in `commandKind` (`src/claude/cmdnames.ts`):
+
+| Kind | What | Where it shows |
+|---|---|---|
+| `menu` | Claude Code commands useful headless (`MENU_CLAUDE_COMMANDS`: compact, context, usage, clear, config, output-style, add-dir, reload-skills…) | `/` menu, `/help` |
+| `own-skill` | Skills and commands from the user, projects, plugins, MCP servers | `/skills` ("Yours") |
+| `skill` | Claude Code's bundled skills (code-review, simplify…) | `/skills` ("Claude Code") |
+| `hidden` | Terminal screens and account flows (theme, login, ide…), or names the bot implements itself | nowhere |
+
+Everything can still be typed. A name Telegram can't spell resolves through the catalog, which
+also learns the names each session reports.
+
+Terminal screens worth having become bot commands (`src/app/inspect.ts`):
+- **`/skills`, `/agents`:** ask the chat's live process. Without one, they ask a throwaway process in
+  the chat's directory (`withProbe`, `src/claude/catalog.ts`): no message, no transcript, no pool
+  slot.
+- **`/mcp`:** acts on the chat's own session process (started if needed), through
+  `mcpServerStatus`, `toggleMcpServer` and `reconnectMcpServer`.
+- **`/tasks`:** reads the tasks the process tracks from `background_tasks_changed` and stops them
+  with `stopTask`.
+- **`/diff`:** runs `git` in the chat's directory.
+- **`/export`:** renders `getSessionMessages`.
+- **`/memory`, `/permissions`, `/hooks`:** read the instruction and settings files
+  (`src/claude/config-files.ts`).
+- **`/plugin`:** runs the `claude plugin` CLI (`CLAUDE_PATH`, else `claude` on PATH, else the SDK's
+  bundled binary), then `reloadPlugins()` in the chat's live session.
+
+Helper programs run through `Exec` (`src/core/exec.ts`): no shell, no stdin, a time limit and bounded
+output. Tests inject their own.

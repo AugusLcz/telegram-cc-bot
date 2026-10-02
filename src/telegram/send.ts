@@ -94,6 +94,12 @@ export async function sendMarkdown(api: Api, target: Target, md: string): Promis
   }
 }
 
+/** Send a file built in memory. */
+export async function sendFile(api: Api, target: Target, name: string, data: Buffer | string, caption?: string): Promise<void> {
+  const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  await call(target, () => api.sendDocument(target.chatId, new InputFile(buf, name), { ...threadParams(target), caption }));
+}
+
 export async function sendPlain(api: Api, target: Target, text: string): Promise<number> {
   return call(target, async () => (await api.sendMessage(target.chatId, text, threadParams(target))).message_id);
 }

@@ -2,8 +2,10 @@ import type { Api } from "grammy";
 import type { CommandCatalog } from "../claude/catalog.ts";
 import type { CommandNameMap } from "../claude/cmdnames.ts";
 import type { SessionPool } from "../claude/pool.ts";
+import type { ProcessFactory } from "../claude/process.ts";
 import type { SessionApi } from "../claude/sessions.ts";
 import type { Config } from "../core/config.ts";
+import type { Exec } from "../core/exec.ts";
 import type { Logger } from "../core/logger.ts";
 import { targetOfKey, type ThreadKey } from "../core/types.ts";
 import type { AccessControl } from "../domain/access.ts";
@@ -37,7 +39,11 @@ export interface App {
   projects: ProjectService;
   threads: ThreadService;
   pool: SessionPool;
+  /** Starts Claude Code processes; also used for short probes outside the pool. */
+  factory: ProcessFactory;
   sessions: SessionApi;
+  /** Runs helper programs (git, the claude CLI). */
+  exec: Exec;
   catalog: CommandCatalog;
   names: CommandNameMap;
   broker: PermissionBroker;

@@ -51,6 +51,9 @@ class FakeSessions implements SessionApi {
   async recap() {
     return {};
   }
+  async transcript() {
+    return [];
+  }
 }
 
 const CHAT = 42;

@@ -42,9 +42,18 @@
 | `/model [名称]` · `/mode [模式]` · `/effort [等级]` | 查看（按钮）或修改这个对话的模型、权限模式、effort；第一条消息之前也能设置 |
 | `/verbose` | 开关这个对话的工具输出和耗时 |
 | `/rename <标题>` | 重命名这个对话和它的会话 |
-| `/fork` | 把这个会话复制到一个新对话 |
+| `/fork`（`/branch`） | 把这个会话复制到一个新对话 |
 | `/close` | 立即关闭这个对话的进程；下一条消息会自动恢复 |
 | `/delete` | 确认后删除对话及其消息（会话本身保留，仍可恢复） |
+| `/plan [任务]` | 把这个对话切到 plan 模式；带任务时直接发出去 |
+| `/skills` | 这里能用的 skills：你的（用户、项目、插件）在前，然后是 Claude Code 自带的；点一下就运行 |
+| `/agents` | Claude 在这里能用的 subagent |
+| `/mcp [reconnect\|enable\|disable <服务器\|all>]` | 这个会话的 MCP 服务器及状态，带重连 / 启用 / 停用按钮 |
+| `/tasks`（`/bashes`） | 这个会话的后台任务（shell、subagent 等），带停止按钮 |
+| `/diff` | 对话目录的 `git status` 和改动摘要；完整 diff 以 `.patch` 文件发送 |
+| `/export` | 把这段对话导出成 Markdown 文件 |
+| `/memory [n]` | 这里的会话会加载哪些 CLAUDE.md / AGENTS.md；`/memory n` 发送其中一个 |
+| `/permissions` · `/hooks` | managed、用户、项目、本地 settings 文件里的权限规则和 hooks |
 
 ### bot
 
@@ -58,12 +67,13 @@
 | `/project add <名称> <路径>` | 登记一个项目目录（必须存在，设置了 `ALLOWED_ROOTS` 时必须在其范围内），并设为当前项目 |
 | `/project use <名称>` · `/project rm <名称>` | 切换当前项目（当前对话还没和 Claude 说过话时也一起切换） · 删除项目 |
 | `/settings` | 新对话的默认模型、权限模式、effort、verbose |
+| `/plugin [list\|install\|uninstall\|enable\|disable\|update\|marketplace …]` | 用 `claude plugin` CLI 管理 Claude Code 插件；当前对话的会话会重新加载 |
 
 没有 `/new`：回到 bot 主屏幕打字就是新对话。
 
-其它斜杠命令原样交给 Claude Code：`/compact`、`/context`、`/usage`、`/clear`、`/init`、`/config key=value`、`/output-style`、`/code-review`，以及你所有的 skills 和插件命令，可以带参数。
+其它斜杠命令原样交给 Claude Code：`/compact`、`/context`、`/usage`、`/clear`、`/init`、`/config key=value`、`/output-style`、`/reload-skills`、`/code-review`，以及你所有的 skills 和插件命令，可以带参数。Claude Code 只在终端里有意义的界面（`/theme`、`/login`、`/ide` 等）在 Telegram 里没有效果；有用的那些由上面的命令代替。
 
-Telegram 菜单名只允许 `[a-z0-9_]`，所以 `code-review` 在菜单里显示为 `/code_review`，`plugin:skill` 显示为 `/plugin_skill`，两种写法都能用。
+`/` 菜单只放命令：先是 bot 自己的，再是 Claude Code 里有用的（`/compact`、`/context`、`/usage`、`/clear` 等）。skills 不进菜单，用 `/skills` 查看，直接输入就能运行。Telegram 命令名只允许 `[a-z0-9_]`，所以 `code-review` 写作 `/code_review`，`plugin:skill` 写作 `/plugin_skill`，两种写法都能用。
 
 ## 会话和进程
 

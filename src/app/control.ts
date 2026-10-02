@@ -1,5 +1,6 @@
 import os from "node:os";
 import { InlineKeyboard, type Context } from "grammy";
+import { commandKind, toTelegramName } from "../claude/cmdnames.ts";
 import { sessionTitle } from "../claude/sessions.ts";
 import { EFFORTS, PERMISSION_MODES, targetOfKey, type ProjectRecord, type SessionSettings, type ThreadKey } from "../core/types.ts";
 import { UserError } from "../domain/errors.ts";
@@ -38,6 +39,10 @@ async function help(app: App, { ctx }: CommandInput): Promise<void> {
     `Anything that is not a bot command goes to Claude, including /compact, /context, /usage and your skills.\n\n` +
     `<b>This chat</b>\n${app.commands.list("chat").map(line).join("\n")}\n\n` +
     `<b>Bot</b>\n${app.commands.list("bot").map(line).join("\n")}`;
+  const botNames = app.commands.names();
+  const claude = app.catalog.commands.filter((c) => commandKind(c, botNames) === "menu").map((c) => `/${toTelegramName(c.name)}`);
+  if (claude.length) html += `\n\n<b>Claude Code</b>\n${claude.join(" ")}`;
+  html += "\n\n<b>Skills</b>: /skills lists them; type /name (with arguments) to run one.";
   if (!app.botInfo.hasTopics) html += `\n\n${THREADED_MODE_HINT}`;
   else if (!app.botInfo.usersCreateTopics) {
     html +=

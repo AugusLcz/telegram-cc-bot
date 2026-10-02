@@ -1,135 +1,10 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { test } from "node:test";
-import { Bot } from "grammy";
-import type { Update, UserFromGetMe } from "grammy/types";
-import { createApp, syncMenu } from "../src/app/bot.ts";
-import type { App } from "../src/app/context.ts";
-import type { SessionApi } from "../src/claude/sessions.ts";
-import { loadConfig } from "../src/core/config.ts";
-import { silentLogger } from "../src/core/logger.ts";
-import { MemoryStore } from "../src/store/store.ts";
+import type { Update } from "grammy/types";
+import { syncMenu } from "../src/app/bot.ts";
 import { Poller } from "../src/telegram/polling.ts";
-import { FakeFactory, type FakeProcess, waitFor } from "./helpers/fake-process.ts";
-
-const OWNER = 42;
-const STRANGER = 7;
-
-interface Call {
-  method: string;
-  payload: Record<string, unknown>;
-}
-
-function harness(opts: { hasTopics?: boolean; reject?: (method: string, payload: Record<string, unknown>) => string | undefined; getUpdates?: (signal?: { addEventListener(type: "abort", fn: () => void): void }) => Promise<Update[]> } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tgcc-bot-"));
-  const home = path.join(root, "home");
-  const other = path.join(root, "other");
-  fs.mkdirSync(home);
-  fs.mkdirSync(other);
-  const cfg = loadConfig({
-    TELEGRAM_BOT_TOKEN: "123456:TEST",
-    ALLOWED_USER_IDS: String(OWNER),
-    DEFAULT_CWD: home,
-    ALLOWED_ROOTS: root,
-    STREAM_MODE: "off",
-  });
-  const botInfo = { id: 999, is_bot: true, first_name: "Bot", username: "test_bot" } as UserFromGetMe;
-  const bot = new Bot(cfg.botToken, { botInfo });
-
-  const calls: Call[] = [];
-  const goneThreads = new Set<number>();
-  let messageId = 1000;
-  let threadId = 900; // topics the bot creates itself (/resume, /fork)
-  bot.api.config.use(async (_prev, method, payload, signal) => {
-    const p = (payload ?? {}) as Record<string, unknown>;
-    calls.push({ method, payload: p });
-    const rejected = opts.reject?.(method, p);
-    if (rejected) return { ok: false, error_code: 400, description: rejected } as never;
-    if (method === "getUpdates" && opts.getUpdates) return { ok: true, result: await opts.getUpdates(signal) } as never;
-    if (typeof p.message_thread_id === "number" && goneThreads.has(p.message_thread_id)) {
-      return { ok: false, error_code: 400, description: "Bad Request: message thread not found" } as never;
-    }
-    let result: unknown = true;
-    if (method === "sendMessage" || method === "sendDocument") {
-      result = { message_id: messageId++, date: 0, chat: { id: p.chat_id, type: "private" }, text: p.text };
-    } else if (method === "createForumTopic") {
-      result = { message_thread_id: threadId++, name: p.name, icon_color: 0 };
-    }
-    return { ok: true, result } as never;
-  });
-
-  // Fake Claude: answers every message with "reply: <text>".
-  const factory = new FakeFactory();
-  factory.onSend = (p, content) => {
-    setTimeout(async () => {
-      await p.emit({ type: "system", subtype: "init", session_id: p.sessionId, model: "m", claude_code_version: "9.9.9" });
-      await p.finishTurn(`reply: ${typeof content === "string" ? content : "[blocks]"}`);
-    }, 1);
-  };
-  const sessions: SessionApi = {
-    list: async () => [],
-    info: async () => undefined,
-    fork: async (id) => `${id}-fork`,
-    rename: async () => {},
-    recap: async () => ({}),
-  };
-  const store = new MemoryStore();
-  const app = createApp({
-    cfg,
-    bot,
-    botInfo: { username: "test_bot", hasTopics: opts.hasTopics ?? true, usersCreateTopics: true },
-    factory,
-    store,
-    sessions,
-    log: silentLogger,
-  });
-  app.catalog.update({ commands: [{ name: "code-review", description: "Review", argumentHint: "" }] });
-
-  let updateId = 1;
-  type SendOpts = { thread?: number; from?: number; extra?: Record<string, unknown> };
-  const message = (text: string, opts: SendOpts = {}): Update => {
-    const from = opts.from ?? OWNER;
-    const entities = text.startsWith("/") ? [{ type: "bot_command", offset: 0, length: text.split(/\s/)[0].length }] : undefined;
-    return {
-      update_id: updateId++,
-      message: {
-        message_id: updateId,
-        date: 0,
-        chat: { id: from, type: "private", first_name: "U" },
-        from: { id: from, is_bot: false, first_name: "U" },
-        text,
-        entities,
-        ...(opts.thread ? { message_thread_id: opts.thread, is_topic_message: true } : {}),
-        ...opts.extra,
-      },
-    } as unknown as Update;
-  };
-  const send = (text: string, opts: SendOpts = {}) => bot.handleUpdate(message(text, opts));
-  const press = (data: string, thread?: number) =>
-    bot.handleUpdate({
-      update_id: updateId++,
-      callback_query: {
-        id: String(updateId),
-        from: { id: OWNER, is_bot: false, first_name: "U" },
-        chat_instance: "c",
-        data,
-        message: {
-          message_id: 1,
-          date: 0,
-          chat: { id: OWNER, type: "private", first_name: "U" },
-          ...(thread ? { message_thread_id: thread, is_topic_message: true } : {}),
-        },
-      },
-    } as unknown as Update);
-
-  const texts = (filter: (c: Call) => boolean = () => true) =>
-    calls.filter((c) => c.method === "sendMessage" && filter(c)).map((c) => String(c.payload.text));
-  const inThread = (t?: number) => (c: Call) => c.payload.message_thread_id === t;
-
-  return { app: app as App, bot, calls, goneThreads, factory, store, message, send, press, texts, inThread, home, other };
-}
+import { type FakeProcess, waitFor } from "./helpers/fake-process.ts";
+import { harness, OWNER, STRANGER } from "./helpers/harness.ts";
 
 test("messages left in two chats while the bot was down: one poll loop serves both sessions", async () => {
   // Telegram queues both messages; on start, the first getUpdates returns them together, and
@@ -337,8 +212,17 @@ test("auto mode unavailable: the chat falls back to acceptEdits and says so", as
   assert.equal(h.factory.last().permissionMode, "acceptEdits");
 });
 
-test("the / menu lists bot and Claude Code commands in every scope a private chat sees", async () => {
+test("the / menu lists commands only, in every scope a private chat sees", async () => {
   const h = harness();
+  h.app.catalog.update({
+    commands: [
+      { name: "compact", description: "Free up context", argumentHint: "", builtin: true },
+      { name: "code-review", description: "Review", argumentHint: "", builtin: true },
+      { name: "theme", description: "Change the theme", argumentHint: "", builtin: true },
+      { name: "status", description: "Claude Code's own status", argumentHint: "", builtin: true },
+      { name: "my-skill", description: "Mine", argumentHint: "" },
+    ],
+  });
   await syncMenu(h.app);
   const sets = h.calls.filter((c) => c.method === "setMyCommands");
   assert.deepEqual(
@@ -346,15 +230,25 @@ test("the / menu lists bot and Claude Code commands in every scope a private cha
     [{ type: "default" }, { type: "all_private_chats" }, { type: "chat", chat_id: OWNER }],
   );
   const commands = sets[0].payload.commands as { command: string; description: string }[];
-  assert.ok(commands.some((c) => c.command === "help"), "bot command");
-  assert.deepEqual(commands.find((c) => c.command === "code_review"), { command: "code_review", description: "Review" });
+  const names = commands.map((c) => c.command);
+  assert.ok(names.includes("help") && names.includes("skills"), "bot commands");
+  assert.deepEqual(commands.find((c) => c.command === "compact"), { command: "compact", description: "Free up context" });
+  assert.ok(names.indexOf("help") < names.indexOf("compact"), "the bot's commands first");
+  for (const hidden of ["code_review", "my_skill", "theme"]) assert.ok(!names.includes(hidden), `${hidden} is not in the menu`);
+  assert.equal(names.filter((n) => n === "status").length, 1, "the bot's /status, once");
+  assert.ok(!names.includes("branch") && !names.includes("bashes"), "aliases stay out");
+  assert.ok(commands.length <= 100);
   assert.ok(sets.every((c) => JSON.stringify(c.payload.commands) === JSON.stringify(commands)));
+
+  await h.send("/code_review the auth module", { thread: 500 });
+  await waitFor(() => h.factory.created.length === 1, 1000, "skill sent to Claude");
+  assert.equal(h.factory.created[0].sent[0], "/code-review the auth module", "hidden skills still run by name");
 });
 
 test("if Telegram rejects Claude Code's commands, the bot's own menu still goes in", async () => {
   const h = harness({
     reject: (method, p) =>
-      method === "setMyCommands" && (p.commands as { command: string }[]).some((c) => c.command === "code_review")
+      method === "setMyCommands" && (p.commands as { command: string }[]).some((c) => c.command === "compact")
         ? "Bad Request: BOT_COMMAND_INVALID"
         : undefined,
   });
@@ -362,7 +256,7 @@ test("if Telegram rejects Claude Code's commands, the bot's own menu still goes 
   const last = h.calls.filter((c) => c.method === "setMyCommands").at(-1)!;
   const commands = last.payload.commands as { command: string }[];
   assert.ok(commands.some((c) => c.command === "help"));
-  assert.ok(!commands.some((c) => c.command === "code_review"));
+  assert.ok(!commands.some((c) => c.command === "compact"));
 });
 
 test("/resume in a chat continues the chosen session in that same chat", async () => {

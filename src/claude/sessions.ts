@@ -14,6 +14,13 @@ export interface Recap {
   assistant?: string;
 }
 
+/** One turn of a transcript, as /export shows it. */
+export interface TranscriptEntry {
+  role: "user" | "assistant";
+  text: string;
+  tools: { name: string; input: Record<string, unknown> }[];
+}
+
 /** Claude Code's on-disk session store, behind an interface so tests can fake it. */
 export interface SessionApi {
   list(opts: { dir?: string; limit: number }): Promise<SessionInfo[]>;
@@ -23,6 +30,8 @@ export interface SessionApi {
   rename(sessionId: string, title: string, dir?: string): Promise<void>;
   /** Last user prompt and last assistant reply, for a "where were we" note. */
   recap(sessionId: string, dir?: string): Promise<Recap>;
+  /** The main thread's messages (no subagents, no tool results). */
+  transcript(sessionId: string, dir?: string): Promise<TranscriptEntry[]>;
 }
 
 export function sessionTitle(info: SessionInfo): string {
@@ -37,6 +46,14 @@ function textOf(message: unknown): string {
     .filter((b) => b?.type === "text" && typeof b.text === "string")
     .map((b) => b.text as string)
     .join("\n");
+}
+
+function toolUses(message: unknown): TranscriptEntry["tools"] {
+  const content = (message as { content?: unknown })?.content;
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((b) => b?.type === "tool_use" && typeof b.name === "string")
+    .map((b) => ({ name: b.name as string, input: (b.input ?? {}) as Record<string, unknown> }));
 }
 
 export const sdkSessionApi: SessionApi = {
@@ -54,5 +71,12 @@ export const sdkSessionApi: SessionApi = {
       user: user ? textOf(user.message).trim() : undefined,
       assistant: assistant ? textOf(assistant.message).trim() : undefined,
     };
+  },
+  transcript: async (sessionId, dir) => {
+    const msgs = await getSessionMessages(sessionId, { dir });
+    return msgs
+      .filter((m) => !m.parent_tool_use_id && (m.type === "user" || m.type === "assistant"))
+      .map((m) => ({ role: m.type as "user" | "assistant", text: textOf(m.message).trim(), tools: toolUses(m.message) }))
+      .filter((e) => e.text || e.tools.length);
   },
 };
