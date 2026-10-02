@@ -100,7 +100,7 @@ Bot-wide commands:
 | `/start`, `/help` | How the bot works and the command list. Warns if Threaded Mode is off |
 | `/status` | This chat's session (ID, project, settings, process state, context usage) plus the bot: live processes, waiting turns, memory, Claude Code version |
 | `/sessions` | Chats with a session and their state (🟢 busy, 🟡 idle, ⚪ hibernated); buttons post a "👋" into a chat to jump there |
-| `/resume [all\|id]` | Pick a past session (active project, all projects, or by ID) and open it in a new chat |
+| `/resume [all\|id]` | Pick a past session (active project, all projects, or by ID) and continue it in this chat |
 | `/projects` | List projects with the active one marked; buttons switch it |
 | `/project add <name> <path>` | Register a project (must exist, be a directory, be inside `ALLOWED_ROOTS` if set, be writable) and make it active |
 | `/project use <name>` | Make it active for new chats, and for this chat if its session has not started |
@@ -116,8 +116,11 @@ spellings back.
 - **Typing on the bot's main screen** opens a new chat. Telegram sends `forum_topic_created` (the bot
   only remembers the name) and the message itself. The first message to Claude binds the chat to the
   active project, posts one line (`📁 project · cwd · new session`) and starts the session.
-- **`/resume`** opens the chosen session in a new chat (`createForumTopic`), named after the session,
-  with a short recap of the last exchange.
+- **`/resume`** continues the chosen session in the chat it was sent from, as Claude Code's own
+  `/resume` does: the chat's process is closed, the chat is rebound to that session (and renamed after
+  it unless the user named the chat), and a short recap of the last exchange is posted. The chat's
+  previous session stays on disk and in the `/resume` list. A session already open in another chat
+  stays there; the bot points to it. Outside a chat (no thread), it opens a new one.
 - **`/fork`** forks the transcript (`forkSession`) and opens it in a new chat.
 - There is no `/new`: going back to the main screen and typing is the new-chat gesture.
 
@@ -320,6 +323,8 @@ The pool takes the spec as a *function*, so a restart always reads the chat's la
 ```ts
 interface State {
   version: 1;
+  botId?: number;                  // the bot these chat bindings belong to
+  botArchive?: Record<string /* botId */, Record<string /* chatId */, Record<string, ThreadRecord>>>;
   projects: Record<string, { name: string; path: string; addedAt: number }>;
   chats: Record<string /* chatId */, {
     activeProject: string;
@@ -343,6 +348,9 @@ interface State {
 - A corrupt state file is moved aside (`state.json.corrupt-<time>`) and the bot starts empty, logging a
   warning, instead of refusing to start.
 - Session transcripts are owned by Claude Code and are never written by the bot.
+- Chat (topic) IDs are per bot while the private chat's ID is the user's, so bindings belong to a bot.
+  When the token changes to another bot, its bindings move to `botArchive` and come back if the
+  token is switched back. A state written before `botId` existed is taken as the current bot's.
 
 ---
 

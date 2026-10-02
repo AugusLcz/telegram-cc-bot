@@ -1,25 +1,40 @@
-import type { ChatRecord, SessionSettings } from "../core/types.ts";
+import type { ChatRecord, SessionSettings, ThreadRecord } from "../core/types.ts";
 import type { Store } from "../store/store.ts";
 
 /**
  * Chat ↔ session bindings belong to one bot. A private chat's ID is the user's
  * ID whichever bot it is with, but its chats (topic IDs) are the bot's own, so
- * after a token change a new chat would land on an old chat's session. When
- * the state was written for another bot (or before the bot was recorded), the
- * bindings are dropped; projects and defaults stay, and the old sessions remain
- * on disk for /resume. Returns how many bindings were dropped.
+ * after a token change a new chat would land on an old chat's session. When the
+ * bot changes, its bindings are put aside (and restored if it comes back) and
+ * the new bot gets its own, if it had any; projects and defaults stay. A state
+ * written before the bot was recorded is taken as this bot's: nothing is lost.
  */
-export function claimStateForBot(store: Store, botId: number): number {
-  if (store.data.botId === botId) return 0;
-  let dropped = 0;
+export function claimStateForBot(store: Store, botId: number): { archived: number; restored: number } {
+  const prev = store.data.botId;
+  const result = { archived: 0, restored: 0 };
+  if (prev === botId) return result;
   store.update((d) => {
-    for (const chat of Object.values(d.chats)) {
-      dropped += Object.keys(chat.threads).length;
+    d.botId = botId;
+    if (prev === undefined) return;
+    const archive = (d.botArchive ??= {});
+    const aside: Record<string, Record<string, ThreadRecord>> = {};
+    for (const [chatId, chat] of Object.entries(d.chats)) {
+      const n = Object.keys(chat.threads).length;
+      if (n) aside[chatId] = chat.threads;
+      result.archived += n;
       chat.threads = {};
     }
-    d.botId = botId;
+    const back = archive[String(botId)] ?? {};
+    delete archive[String(botId)];
+    if (result.archived) archive[String(prev)] = aside;
+    for (const [chatId, threads] of Object.entries(back)) {
+      const chat = d.chats[chatId];
+      if (!chat) continue;
+      chat.threads = threads;
+      result.restored += Object.keys(threads).length;
+    }
   });
-  return dropped;
+  return result;
 }
 
 /** Per-chat records: active project and defaults for new tabs. */

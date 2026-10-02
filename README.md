@@ -35,7 +35,7 @@ With **Threaded Mode** enabled in @BotFather, Telegram splits your conversation 
 - **Bot commands are mechanical.** `/projects`, `/status`, `/settings`, `/model` and the rest never involve Claude, work in any chat, and a chat used only for them doesn't become a session.
 - **Everything else goes to Claude**, including Claude Code's own slash commands and your skills.
 
-To work in another directory, switch the project first (`/project use api`, in any chat), then start a new chat. If you switch inside a chat that hasn't talked to Claude yet, that chat moves too. Old sessions, including ones started from the terminal on the server, can be reopened in a new chat with `/resume`.
+To work in another directory, switch the project first (`/project use api`, in any chat), then start a new chat. If you switch inside a chat that hasn't talked to Claude yet, that chat moves too. `/resume` continues an old session, including one started from the terminal on the server, in the chat you send it from, like Claude Code's own `/resume`; the chat's previous session stays in the list.
 
 ## Why this design
 
@@ -80,7 +80,7 @@ All bot commands work in every chat and don't involve Claude.
 | `/help` | How the bot works and the command list |
 | `/status` | This chat's session plus live processes, waiting messages, memory, Claude Code version |
 | `/sessions` | Chats with a session and their state (🟢 busy, 🟡 idle, ⚪ hibernated); tap one to jump there |
-| `/resume [all\|id]` | Open a past session (active project, all projects, or by ID) in a new chat |
+| `/resume [all\|id]` | Continue a past session (active project, all projects, or by ID) in this chat |
 | `/projects` | List projects, buttons to switch the active one |
 | `/project add <name> <path>` | Register a project directory (must exist and be inside `ALLOWED_ROOTS` if set) and make it active |
 | `/project use <name>` · `/project rm <name>` | Switch the active project (also moves this chat if it hasn't talked to Claude yet) · remove one |
@@ -248,7 +248,7 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 
 | Symptom | Fix |
 |---|---|
-| Changed the bot token, but the script still shows the old bot | The service reads only `/opt/tg-cc-bot/.env`. Run `sudo bash deploy/deploy.sh update` (or `install`): it applies a token exported in your environment (not through a plain `sudo`, which drops it) and offers to copy one from this checkout's `.env`. After a switch to another bot, the chats saved for the old bot are forgotten; their sessions stay available with `/resume` |
+| Changed the bot token, but the script still shows the old bot | The service reads only `/opt/tg-cc-bot/.env`. Run `sudo bash deploy/deploy.sh update` (or `install`): it applies a token exported in your environment (not through a plain `sudo`, which drops it) and offers to copy one from this checkout's `.env`. After a switch to another bot, the old bot's chat bindings are put aside (and come back if you switch back); its sessions stay available with `/resume` |
 | Anything unclear | Run `sudo bash deploy/deploy.sh check` first; every ✗ comes with a hint |
 | The bot says Threaded Mode is off | Enable **Threaded Mode** in @BotFather → your bot → Bot Settings, then restart the bot |
 | Typing on the main screen doesn't open a new chat | In @BotFather's Threaded Mode settings, allow users to create topics |

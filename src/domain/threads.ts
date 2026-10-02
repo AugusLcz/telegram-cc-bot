@@ -136,7 +136,48 @@ export class ThreadService {
     return { ...tab, created: true };
   }
 
-  /** /resume: open an existing session in a new tab (or return the tab that already has it). */
+  /**
+   * /resume inside a chat: continue an existing session here, as Claude Code's
+   * own /resume does. The chat's previous session stays on disk (it shows up
+   * in /resume). A session bound to another chat stays there: that chat is
+   * returned with `elsewhere`.
+   */
+  async resumeHere(key: ThreadKey, sessionId: string): Promise<Tab & { elsewhere?: boolean; already?: boolean }> {
+    return this.mutex.run(key, async () => {
+      const bound = this.findBySession(sessionId);
+      if (bound) return bound.key === key ? { ...bound, already: true } : { ...bound, elsewhere: true };
+      if (this.d.pool.state(key) === "busy") {
+        throw new UserError("Claude is still working in this chat. /stop it first, or /resume from another chat.");
+      }
+      const info = await this.d.sessions.info(sessionId);
+      if (!info) throw new UserError(`Session ${sessionId} not found.`);
+      const { chatId, threadId } = parseThreadKey(key);
+      const cwd = info.cwd ?? this.d.projects.activeFor(chatId).path;
+      const project = this.d.projects.findByPath(cwd) ?? { name: "-", path: cwd, addedAt: 0 };
+      const title = sessionTitle(info);
+      this.d.pool.cancelWaiting(key);
+      await this.d.pool.hibernate(key, "closed");
+      const record = this.get(key) ?? this.save(chatId, this.newRecord(chatId, threadId, project, title, "auto")).record;
+      const retitle = record.titleSource !== "user" && record.title !== title;
+      this.d.store.update(() => {
+        record.sessionId = info.sessionId;
+        record.started = true;
+        record.project = project.name;
+        record.cwd = cwd;
+        if (record.titleSource !== "user") {
+          record.title = title;
+          record.titleSource = "auto";
+        }
+      });
+      this.touch(record);
+      if (retitle) {
+        await this.d.topics.rename({ chatId, threadId }, title).catch((err) => this.log.debug(`renaming ${key} failed:`, err));
+      }
+      return { key, record };
+    });
+  }
+
+  /** /resume where there is no chat to continue in: open the session in a new tab (or return the tab that has it). */
   async resumeIntoTab(chatId: number, sessionId: string): Promise<Tab & { existed: boolean }> {
     const bound = this.findBySession(sessionId);
     if (bound) return { ...bound, existed: true };

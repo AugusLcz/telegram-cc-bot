@@ -16,7 +16,7 @@
 - **bot 命令是机械性的**：`/projects`、`/status`、`/settings`、`/model` 等命令不经过 Claude，在任何对话里都能用；只发过这类命令的对话不会变成会话。
 - **其它内容都交给 Claude**，包括 Claude Code 自己的斜杠命令和你的 skills。
 
-想换目录工作：先在任意对话里切换项目（比如 `/project use api`），再新建对话。如果是在一个还没和 Claude 说过话的对话里切换，这个对话也会一起换过去。之前的会话（包括在服务器终端里用 Claude Code 开的会话）可以用 `/resume` 在新对话里打开。
+想换目录工作：先在任意对话里切换项目（比如 `/project use api`），再新建对话。如果是在一个还没和 Claude 说过话的对话里切换，这个对话也会一起换过去。`/resume` 可以在当前对话里接着之前的会话聊（包括在服务器终端里用 Claude Code 开的会话），和 Claude Code 自己的 `/resume` 一样；这个对话原来的会话仍然留在列表里。
 
 ## 功能
 
@@ -53,7 +53,7 @@
 | `/help` | 使用说明和命令列表 |
 | `/status` | 当前对话的会话，以及运行中的进程、排队的消息、内存、Claude Code 版本 |
 | `/sessions` | 有会话的对话及其状态（🟢 运行中、🟡 空闲、⚪ 已休眠），点一下跳到那个对话 |
-| `/resume [all\|id]` | 在新对话里打开之前的会话（当前项目、全部项目，或按 ID） |
+| `/resume [all\|id]` | 在当前对话里继续之前的会话（当前项目、全部项目，或按 ID） |
 | `/projects` | 列出项目，按钮切换当前项目 |
 | `/project add <名称> <路径>` | 登记一个项目目录（必须存在，设置了 `ALLOWED_ROOTS` 时必须在其范围内），并设为当前项目 |
 | `/project use <名称>` · `/project rm <名称>` | 切换当前项目（当前对话还没和 Claude 说过话时也一起切换） · 删除项目 |
@@ -202,7 +202,7 @@ sudo bash deploy/deploy.sh
 
 | 现象 | 处理 |
 |---|---|
-| 换了 bot token，脚本显示的还是旧 bot | 服务只读 `/opt/tg-cc-bot/.env`。运行 `sudo bash deploy/deploy.sh update`（或 `install`）：它会应用环境变量里导出的 token（普通 `sudo` 会把环境变量丢掉），并询问是否复制这个 checkout 的 `.env` 里的 token。换成另一个 bot 后，为旧 bot 保存的对话绑定会被清掉，那些会话仍然可以用 `/resume` 打开 |
+| 换了 bot token，脚本显示的还是旧 bot | 服务只读 `/opt/tg-cc-bot/.env`。运行 `sudo bash deploy/deploy.sh update`（或 `install`）：它会应用环境变量里导出的 token（普通 `sudo` 会把环境变量丢掉），并询问是否复制这个 checkout 的 `.env` 里的 token。换成另一个 bot 后，旧 bot 的对话绑定会先存起来（换回去时自动恢复），那些会话仍然可以用 `/resume` 打开 |
 | 不确定哪里有问题 | 先跑 `sudo bash deploy/deploy.sh check`，每个 ✗ 都附有修复提示 |
 | bot 提示 Threaded Mode 没开 | 在 @BotFather → 你的 bot → Bot Settings 里开启 **Threaded Mode**，然后重启 bot |
 | 在主屏幕打字不会新建对话 | 在 @BotFather 的 Threaded Mode 设置里允许用户创建话题 |

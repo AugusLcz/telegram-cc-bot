@@ -77,6 +77,8 @@ export interface StateData {
   version: 1;
   /** The bot whose chats `chats[*].threads` refer to (absent in states written before it was recorded). */
   botId?: number;
+  /** Chat ↔ session bindings of other bots this state served: bot ID → chat ID → thread ID → record. */
+  botArchive?: Record<string, Record<string, Record<string, ThreadRecord>>>;
   projects: Record<string, ProjectRecord>;
   chats: Record<string, ChatRecord>;
 }

@@ -40,9 +40,12 @@ const botInfo = {
 if (!botInfo.hasTopics) log.warn("Threaded Mode is off in @BotFather: the bot cannot keep separate sessions until it is enabled");
 
 const store = new JsonFileStore(cfg.stateFile, { log: log.child("store") });
-const dropped = claimStateForBot(store, me.id);
-if (dropped) {
-  log.warn(`the saved chats belong to another bot (or an older version): forgot ${dropped} chat ↔ session binding(s); the sessions stay available via /resume`);
+const claimed = claimStateForBot(store, me.id);
+if (claimed.archived || claimed.restored) {
+  log.warn(
+    `bot changed: put ${claimed.archived} chat ↔ session binding(s) of the previous bot aside (restored if it comes back), ` +
+      `restored ${claimed.restored} of @${me.username}`,
+  );
 }
 const factory = new SdkProcessFactory({ claudePath: cfg.claudePath, log: log.child("claude") });
 const app = createApp({ cfg, bot, botInfo, factory, store, sessions: sdkSessionApi, log });

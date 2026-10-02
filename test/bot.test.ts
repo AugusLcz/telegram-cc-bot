@@ -364,3 +364,24 @@ test("if Telegram rejects Claude Code's commands, the bot's own menu still goes 
   assert.ok(commands.some((c) => c.command === "help"));
   assert.ok(!commands.some((c) => c.command === "code_review"));
 });
+
+test("/resume in a chat continues the chosen session in that same chat", async () => {
+  const h = harness();
+  await h.send("first question", { thread: 500 });
+  await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: first question")), 1000, "first reply");
+  const id = "12345678-aaaa-bbbb-cccc-1234567890ab";
+  h.app.sessions.info = async () => ({ sessionId: id, summary: "Earlier work", lastModified: 1, cwd: h.home });
+
+  await h.send(`/resume ${id}`, { thread: 500 });
+  assert.equal(h.calls.some((c) => c.method === "createForumTopic"), false, "no new chat");
+  assert.equal(h.app.threads.get(`${OWNER}:500`)!.sessionId, id);
+  const here = h.texts(h.inThread(500));
+  assert.ok(here.some((t) => t.includes("Resumed: <b>Earlier work</b>")));
+  assert.ok(here.some((t) => t.includes("Continuing")));
+
+  await h.send("and now?", { thread: 500 });
+  await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: and now?")), 1000, "reply in the resumed session");
+  const spec = h.factory.created.at(-1)!.spec;
+  assert.equal(spec.sessionId, id);
+  assert.equal(spec.resume, true);
+});

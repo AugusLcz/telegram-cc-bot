@@ -119,17 +119,21 @@ async function onProjectButton(app: App, ctx: Context, name: string): Promise<vo
 
 // ---- sessions ------------------------------------------------------------------
 
+/** Continue a past session in the chat /resume was used in (a new chat when there is none). */
 async function openResumed(app: App, ctx: Context, sessionId: string): Promise<string> {
   requireTabs(app);
-  const tab = await app.threads.resumeIntoTab(chatOf(ctx), sessionId);
+  const here = targetOf(ctx);
+  const hereKey = here && keyOf(here);
+  const tab = hereKey ? await app.threads.resumeHere(hereKey, sessionId) : await app.threads.resumeIntoTab(chatOf(ctx), sessionId);
   const target = targetOfKey(tab.key);
-  if (tab.existed) {
+  if (("elsewhere" in tab && tab.elsewhere) || ("existed" in tab && tab.existed)) {
     await replyTo(app, target, "👋 This session is open here.");
     return `Already open in chat "${tab.record.title}"`;
   }
+  if ("already" in tab && tab.already) return "This chat already continues that session";
   const recap = await app.sessions.recap(tab.record.sessionId, tab.record.cwd).catch(() => undefined);
   await replyTo(app, target, tabHeader(tab.record, "resumed", recap));
-  return `Opened "${tab.record.title}" in a new chat`;
+  return hereKey ? `Continuing "${tab.record.title}" here` : `Opened "${tab.record.title}" in a new chat`;
 }
 
 async function resume(app: App, { ctx, args }: CommandInput): Promise<void> {
@@ -155,7 +159,13 @@ async function resume(app: App, { ctx, args }: CommandInput): Promise<void> {
     return `${i + 1}. ${pinned}<b>${escapeHtml(truncate(title, 80))}</b>\n    ${relTime(s.lastModified)}${s.gitBranch ? ` · ${escapeHtml(s.gitBranch)}` : ""}${where}`;
   });
   const scope = all ? "all projects" : `<b>${escapeHtml(active.name)}</b>`;
-  await reply(app, ctx, `Open a past session from ${scope} in a new chat (📌 already has a chat):\n\n${lines.join("\n")}`, kb);
+  await reply(
+    app,
+    ctx,
+    `Continue a past session from ${scope} in this chat (📌 open in a chat already). ` +
+      `This chat's current session stays in this list.\n\n${lines.join("\n")}`,
+    kb,
+  );
 }
 
 async function onResumeButton(app: App, ctx: Context, sessionId: string): Promise<void> {
@@ -301,7 +311,7 @@ export function registerControl(app: App): void {
     .register({ name: "start", group: "bot", description: "How this bot works", hidden: true, run: help })
     .register({ name: "status", group: "bot", description: "This chat's session and the bot's state", run: status })
     .register({ name: "sessions", group: "bot", description: "Chats with a session, and their state", run: sessions })
-    .register({ name: "resume", group: "bot", usage: "[all|id]", description: "Open a past session in a new chat", run: resume })
+    .register({ name: "resume", group: "bot", usage: "[all|id]", description: "Continue a past session in this chat", run: resume })
     .register({ name: "projects", group: "bot", description: "List projects and switch the active one", run: projects })
     .register({ name: "project", group: "bot", usage: "add|use|rm …", description: "Manage projects", run: project })
     .register({ name: "settings", group: "bot", description: "Defaults for new chats", run: settings });

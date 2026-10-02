@@ -273,27 +273,78 @@ test("pruneEmpty forgets only old chats that never started a session", async () 
   assert.ok(threads.get(used.key), "chats with a session stay");
 });
 
-test("chats saved for another bot are unbound; projects and defaults stay", () => {
+test("a bot switch puts chat bindings aside and a switch back restores them; an old state is kept", () => {
   const store = new MemoryStore();
   store.update((d) => {
     d.projects.home = { name: "home", path: "/w", addedAt: 0 };
     d.chats["42"] = {
       activeProject: "home",
       defaults: { permissionMode: "auto", verbose: false },
-      threads: { "5": { threadId: 5, sessionId: "s-old" } as never, "6": { threadId: 6, sessionId: "s-old2" } as never },
+      threads: { "5": { threadId: 5, sessionId: "s-a" } as never, "6": { threadId: 6, sessionId: "s-a2" } as never },
     };
   });
-  assert.equal(claimStateForBot(store, 111), 2, "no bot recorded yet: bindings can't be trusted");
-  assert.deepEqual(store.data.chats["42"].threads, {});
-  assert.equal(store.data.chats["42"].activeProject, "home");
-  assert.ok(store.data.projects.home);
+  assert.deepEqual(claimStateForBot(store, 111), { archived: 0, restored: 0 }, "state from before the bot was recorded: kept");
+  assert.equal(Object.keys(store.data.chats["42"].threads).length, 2);
   assert.equal(store.data.botId, 111);
+  assert.deepEqual(claimStateForBot(store, 111), { archived: 0, restored: 0 }, "same bot: nothing changes");
 
-  store.update((d) => {
-    d.chats["42"].threads["7"] = { threadId: 7, sessionId: "s-new" } as never;
-  });
-  assert.equal(claimStateForBot(store, 111), 0, "same bot: nothing changes");
-  assert.ok(store.data.chats["42"].threads["7"]);
-  assert.equal(claimStateForBot(store, 222), 1, "token switched to another bot");
+  assert.deepEqual(claimStateForBot(store, 222), { archived: 2, restored: 0 }, "token switched to another bot");
   assert.deepEqual(store.data.chats["42"].threads, {});
+  assert.equal(store.data.chats["42"].activeProject, "home", "projects and defaults stay");
+  store.update((d) => {
+    d.chats["42"].threads["5"] = { threadId: 5, sessionId: "s-b" } as never;
+  });
+
+  assert.deepEqual(claimStateForBot(store, 111), { archived: 1, restored: 2 }, "switched back");
+  assert.equal(store.data.chats["42"].threads["5"].sessionId, "s-a");
+  assert.equal(store.data.botArchive?.["222"]?.["42"]?.["5"]?.sessionId, "s-b");
+  assert.equal(store.data.botArchive?.["111"], undefined);
+});
+
+test("resumeHere continues a past session in the same chat; the old one stays resumable", async () => {
+  const { threads, sessions, topics, factory, api } = setup();
+  sessions.infos.set("cli-1", { sessionId: "cli-1", summary: "CLI work", lastModified: 1, cwd: api });
+  const tab = threads.bindTab(CHAT, 100);
+  await threads.send(tab.key, "hello", "hello");
+  const p1 = factory.last();
+  await p1.emit({ type: "system", subtype: "init", session_id: tab.record.sessionId, model: "m" });
+  await p1.finishTurn();
+  const before = threads.get(tab.key)!.sessionId;
+
+  const res = await threads.resumeHere(tab.key, "cli-1");
+  assert.equal(res.key, tab.key, "same chat, no new topic");
+  assert.equal(topics.created.length, 0);
+  const r = threads.get(tab.key)!;
+  assert.equal(r.sessionId, "cli-1");
+  assert.equal(r.started, true);
+  assert.equal(r.cwd, api);
+  assert.equal(r.title, "CLI work");
+  assert.equal(topics.renamed.at(-1)!.name, "CLI work", "auto-titled chats take the session's title");
+  assert.equal(threads.findBySession(before), undefined, "the previous session is free for /resume again");
+
+  await threads.send(tab.key, "continue");
+  const p2 = factory.last();
+  assert.notEqual(p2, p1, "the old process was closed");
+  assert.equal(p2.spec.sessionId, "cli-1");
+  assert.equal(p2.spec.resume, true);
+  assert.equal((await threads.resumeHere(tab.key, "cli-1")).already, true);
+});
+
+test("resumeHere: a fresh chat binds to it; a session open elsewhere stays there; a busy chat refuses", async () => {
+  const { threads, sessions, factory, web } = setup();
+  sessions.infos.set("cli-1", { sessionId: "cli-1", summary: "CLI work", lastModified: 1, cwd: web });
+  const fresh = await threads.resumeHere(`${CHAT}:300`, "cli-1");
+  assert.equal(threads.get(`${CHAT}:300`)!.sessionId, "cli-1");
+  assert.equal(fresh.record.project, "home");
+  const other = await threads.resumeHere(`${CHAT}:301`, "cli-1");
+  assert.equal(other.elsewhere, true);
+  assert.equal(other.key, `${CHAT}:300`);
+  assert.equal(threads.get(`${CHAT}:301`), undefined);
+
+  sessions.infos.set("cli-2", { sessionId: "cli-2", summary: "Other", lastModified: 2, cwd: web });
+  const busy = threads.bindTab(CHAT, 302);
+  await threads.send(busy.key, "long task");
+  assert.ok(factory.last());
+  await assert.rejects(threads.resumeHere(busy.key, "cli-2"), UserError);
+  await assert.rejects(threads.resumeHere(`${CHAT}:303`, "missing"), UserError);
 });

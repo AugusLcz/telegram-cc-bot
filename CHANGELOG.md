@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-02
+
+### Changed
+
+- `/resume` continues the chosen session in the chat it is sent from, like Claude Code's own
+  `/resume`, instead of opening a new chat. The chat's previous session stays in the `/resume` list;
+  a session already open in another chat stays there.
+
+### Fixed
+
+- v0.2.1 dropped every chat ↔ session binding on its first start when upgrading from v0.2.0 (the state
+  did not record the bot yet), so existing chats started over. A state without a recorded bot is now
+  taken as the current bot's, and after a switch to another bot the old bindings are put aside and
+  restored if the token is switched back, never deleted. Chats affected by v0.2.1 can get their
+  session back with `/resume` in that chat.
+
 ## [0.2.1] - 2026-10-02
 
 ### Fixed
@@ -115,7 +131,8 @@ First release.
   real Bot API spike script (`scripts/topics-spike.ts`).
 - Architecture document, English and Chinese READMEs, 66 tests.
 
-[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AugusLcz/telegram-cc-bot/releases/tag/v0.1.0
