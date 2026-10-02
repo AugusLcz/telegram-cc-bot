@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { SessionPool } from "../src/claude/pool.ts";
 import type { SessionApi, SessionInfo } from "../src/claude/sessions.ts";
 import type { Target } from "../src/core/types.ts";
-import { ChatService } from "../src/domain/chats.ts";
+import { ChatService, claimStateForBot } from "../src/domain/chats.ts";
 import { UserError } from "../src/domain/errors.ts";
 import { ProjectService } from "../src/domain/projects.ts";
 import { ThreadService, type TopicGateway } from "../src/domain/threads.ts";
@@ -271,4 +271,29 @@ test("pruneEmpty forgets only old chats that never started a session", async () 
   assert.equal(threads.get(empty.key), undefined);
   assert.ok(threads.get(fresh.key), "recent empty chats stay");
   assert.ok(threads.get(used.key), "chats with a session stay");
+});
+
+test("chats saved for another bot are unbound; projects and defaults stay", () => {
+  const store = new MemoryStore();
+  store.update((d) => {
+    d.projects.home = { name: "home", path: "/w", addedAt: 0 };
+    d.chats["42"] = {
+      activeProject: "home",
+      defaults: { permissionMode: "auto", verbose: false },
+      threads: { "5": { threadId: 5, sessionId: "s-old" } as never, "6": { threadId: 6, sessionId: "s-old2" } as never },
+    };
+  });
+  assert.equal(claimStateForBot(store, 111), 2, "no bot recorded yet: bindings can't be trusted");
+  assert.deepEqual(store.data.chats["42"].threads, {});
+  assert.equal(store.data.chats["42"].activeProject, "home");
+  assert.ok(store.data.projects.home);
+  assert.equal(store.data.botId, 111);
+
+  store.update((d) => {
+    d.chats["42"].threads["7"] = { threadId: 7, sessionId: "s-new" } as never;
+  });
+  assert.equal(claimStateForBot(store, 111), 0, "same bot: nothing changes");
+  assert.ok(store.data.chats["42"].threads["7"]);
+  assert.equal(claimStateForBot(store, 222), 1, "token switched to another bot");
+  assert.deepEqual(store.data.chats["42"].threads, {});
 });

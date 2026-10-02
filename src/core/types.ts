@@ -75,6 +75,8 @@ export interface ChatRecord {
 
 export interface StateData {
   version: 1;
+  /** The bot whose chats `chats[*].threads` refer to (absent in states written before it was recorded). */
+  botId?: number;
   projects: Record<string, ProjectRecord>;
   chats: Record<string, ChatRecord>;
 }

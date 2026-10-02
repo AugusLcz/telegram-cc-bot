@@ -78,6 +78,16 @@ export function claudeEnv(base: NodeJS.ProcessEnv = process.env): Record<string,
   return env;
 }
 
+/**
+ * Settings applied on top of the account's own in every session the bot starts.
+ * Claude Code's Telegram channel plugin starts a poller in each session that
+ * loads it; on this bot's token that is a second client stealing its messages
+ * (409 Conflict), one more for every open chat. The bot is the Telegram side here.
+ */
+export const SESSION_FLAG_SETTINGS = {
+  enabledPlugins: { "telegram@claude-plugins-official": false },
+};
+
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout;
   return Promise.race([
@@ -127,7 +137,10 @@ export class SdkProcess implements ProcessHandle {
         effort: s.effort,
         ...(s.resume ? { resume: s.sessionId } : { sessionId: s.sessionId }),
         includePartialMessages: true,
+        // Claude Code's own system prompt. Left out, the SDK sends an empty one.
+        systemPrompt: { type: "preset", preset: "claude_code" },
         settingSources: ["user", "project", "local"],
+        settings: SESSION_FLAG_SETTINGS,
         canUseTool: this.hooks.canUseTool,
         env: claudeEnv(),
         pathToClaudeCodeExecutable: this.opts.claudePath,

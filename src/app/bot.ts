@@ -1,5 +1,6 @@
 import { sequentialize } from "@grammyjs/runner";
 import type { Bot, Context, NextFunction } from "grammy";
+import type { BotCommandScope } from "grammy/types";
 import { CommandCatalog } from "../claude/catalog.ts";
 import { CommandNameMap, parseCommand } from "../claude/cmdnames.ts";
 import { SessionPool } from "../claude/pool.ts";
@@ -257,7 +258,13 @@ async function errorBoundary(app: App, ctx: Context, next: NextFunction): Promis
   }
 }
 
-/** Bot commands plus Claude Code's (mapped to Telegram's naming rules) as the chat menu. */
+/**
+ * The chat menu Telegram shows after "/": the bot's commands plus Claude
+ * Code's, mapped to Telegram's naming rules (at most 100). It is set for every
+ * scope a private chat can see: default, all private chats, and each allowed
+ * user's chat, which outranks the others, so a menu another program set for this
+ * bot can't hide it. If Telegram rejects the full list, the bot's own still go in.
+ */
 export async function syncMenu(app: App): Promise<void> {
   const own = app.commands.menu();
   const pairs = app.names.rebuild(app.catalog.commandNames, app.commands.names());
@@ -266,5 +273,23 @@ export async function syncMenu(app: App): Promise<void> {
     command,
     description: truncate((descriptions.get(name) || name).replace(/\s+/g, " ").trim() || name, 256),
   }));
-  await app.api.setMyCommands([...own, ...claude].slice(0, 100));
+  const full = [...own, ...claude].slice(0, 100);
+  const users: BotCommandScope[] = [...app.cfg.allowedUserIds].map((id) => ({ type: "chat", chat_id: id }));
+  const setAll = async (commands: typeof own) => {
+    await app.api.setMyCommands(commands, { scope: { type: "default" } });
+    await app.api.setMyCommands(commands, { scope: { type: "all_private_chats" } });
+    for (const scope of users) {
+      // Fails for a user who never opened the bot; the scopes above cover them.
+      await app.api.setMyCommands(commands, { scope }).catch((err) => app.log.debug("chat menu not set:", err));
+    }
+  };
+  try {
+    await setAll(full);
+  } catch (err) {
+    if (full.length === own.length) throw err;
+    app.log.warn("Telegram rejected the menu with Claude Code's commands; setting the bot's own only:", err);
+    await setAll(own);
+    return;
+  }
+  app.log.info(`menu: ${full.length} commands (${full.length - own.length} from Claude Code)`);
 }

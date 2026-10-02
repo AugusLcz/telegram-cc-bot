@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { Bot } from "grammy";
 import type { Update, UserFromGetMe } from "grammy/types";
-import { createApp } from "../src/app/bot.ts";
+import { createApp, syncMenu } from "../src/app/bot.ts";
 import type { App } from "../src/app/context.ts";
 import type { SessionApi } from "../src/claude/sessions.ts";
 import { loadConfig } from "../src/core/config.ts";
@@ -22,7 +22,7 @@ interface Call {
   payload: Record<string, unknown>;
 }
 
-function harness(opts: { hasTopics?: boolean; getUpdates?: (signal?: { addEventListener(type: "abort", fn: () => void): void }) => Promise<Update[]> } = {}) {
+function harness(opts: { hasTopics?: boolean; reject?: (method: string, payload: Record<string, unknown>) => string | undefined; getUpdates?: (signal?: { addEventListener(type: "abort", fn: () => void): void }) => Promise<Update[]> } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tgcc-bot-"));
   const home = path.join(root, "home");
   const other = path.join(root, "other");
@@ -45,6 +45,8 @@ function harness(opts: { hasTopics?: boolean; getUpdates?: (signal?: { addEventL
   bot.api.config.use(async (_prev, method, payload, signal) => {
     const p = (payload ?? {}) as Record<string, unknown>;
     calls.push({ method, payload: p });
+    const rejected = opts.reject?.(method, p);
+    if (rejected) return { ok: false, error_code: 400, description: rejected } as never;
     if (method === "getUpdates" && opts.getUpdates) return { ok: true, result: await opts.getUpdates(signal) } as never;
     if (typeof p.message_thread_id === "number" && goneThreads.has(p.message_thread_id)) {
       return { ok: false, error_code: 400, description: "Bad Request: message thread not found" } as never;
@@ -333,4 +335,32 @@ test("auto mode unavailable: the chat falls back to acceptEdits and says so", as
   await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("Auto mode isn't available")), 1000, "fallback notice");
   assert.equal(h.app.threads.get(`${OWNER}:500`)!.permissionMode, "acceptEdits");
   assert.equal(h.factory.last().permissionMode, "acceptEdits");
+});
+
+test("the / menu lists bot and Claude Code commands in every scope a private chat sees", async () => {
+  const h = harness();
+  await syncMenu(h.app);
+  const sets = h.calls.filter((c) => c.method === "setMyCommands");
+  assert.deepEqual(
+    sets.map((c) => c.payload.scope),
+    [{ type: "default" }, { type: "all_private_chats" }, { type: "chat", chat_id: OWNER }],
+  );
+  const commands = sets[0].payload.commands as { command: string; description: string }[];
+  assert.ok(commands.some((c) => c.command === "help"), "bot command");
+  assert.deepEqual(commands.find((c) => c.command === "code_review"), { command: "code_review", description: "Review" });
+  assert.ok(sets.every((c) => JSON.stringify(c.payload.commands) === JSON.stringify(commands)));
+});
+
+test("if Telegram rejects Claude Code's commands, the bot's own menu still goes in", async () => {
+  const h = harness({
+    reject: (method, p) =>
+      method === "setMyCommands" && (p.commands as { command: string }[]).some((c) => c.command === "code_review")
+        ? "Bad Request: BOT_COMMAND_INVALID"
+        : undefined,
+  });
+  await syncMenu(h.app);
+  const last = h.calls.filter((c) => c.method === "setMyCommands").at(-1)!;
+  const commands = last.payload.commands as { command: string }[];
+  assert.ok(commands.some((c) => c.command === "help"));
+  assert.ok(!commands.some((c) => c.command === "code_review"));
 });

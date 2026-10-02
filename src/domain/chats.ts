@@ -1,6 +1,27 @@
 import type { ChatRecord, SessionSettings } from "../core/types.ts";
 import type { Store } from "../store/store.ts";
 
+/**
+ * Chat ↔ session bindings belong to one bot. A private chat's ID is the user's
+ * ID whichever bot it is with, but its chats (topic IDs) are the bot's own, so
+ * after a token change a new chat would land on an old chat's session. When
+ * the state was written for another bot (or before the bot was recorded), the
+ * bindings are dropped; projects and defaults stay, and the old sessions remain
+ * on disk for /resume. Returns how many bindings were dropped.
+ */
+export function claimStateForBot(store: Store, botId: number): number {
+  if (store.data.botId === botId) return 0;
+  let dropped = 0;
+  store.update((d) => {
+    for (const chat of Object.values(d.chats)) {
+      dropped += Object.keys(chat.threads).length;
+      chat.threads = {};
+    }
+    d.botId = botId;
+  });
+  return dropped;
+}
+
 /** Per-chat records: active project and defaults for new tabs. */
 export class ChatService {
   private readonly store: Store;

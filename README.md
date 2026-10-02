@@ -4,7 +4,7 @@
 
 [中文说明](README-zh.md) · [Architecture](docs/ARCHITECTURE.md)
 
-tg-cc-bot is a thin Telegram front end for real, unmodified Claude Code processes. The [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) runs Claude Code. The agent loop, tools, skills, `CLAUDE.md`, MCP servers, hooks and permission system are all Claude Code's own. The bot relays messages, renders output, turns prompts into buttons and manages which sessions have a running process.
+tg-cc-bot is a thin Telegram front end for real, unmodified Claude Code processes. The [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) runs Claude Code. The system prompt, agent loop, tools, skills, `CLAUDE.md`, MCP servers, hooks and permission system are all Claude Code's own; the bot adds no prompt of its own. One exception: Claude Code's Telegram channel plugin is turned off in the bot's sessions, since each session would otherwise poll this bot as well. The bot relays messages, renders output, turns prompts into buttons and manages which sessions have a running process.
 
 ---
 
@@ -136,7 +136,7 @@ The bot runs as the account from step 2 and shares that account's Claude login, 
 
 ## Quick start
 
-With the [prerequisites](#prerequisites) done:
+To try it on your own machine, in a terminal (with the [prerequisites](#prerequisites) done). On a server, [deploy](#deploying-on-a-linux-server) instead; don't do both with one bot token, or the two copies split its messages.
 
 1. Install and configure:
    ```bash
@@ -164,7 +164,7 @@ It runs these steps, and is safe to re-run at any time:
 2. **Prerequisites.** Checks that Claude Code is installed and signed in for the account (see [Prerequisites](#prerequisites)). If not, it stops right away and prints the exact commands to run; it never creates accounts or runs a login itself.
 3. **Bun.** Installs Bun for that account, or keeps an existing one that is recent enough.
 4. **Application.** Copies the code to `/opt/tg-cc-bot` and installs dependencies. The Agent SDK brings a Claude Code binary matching its version, which uses the account's existing login.
-5. **Configuration.** Creates `.env` (mode 600) and asks for:
+5. **Configuration.** The service reads only `/opt/tg-cc-bot/.env` (mode 600). Values exported in your environment are written into it (run the script without `sudo` and it re-runs itself with `sudo -E`; a plain `sudo` drops them). Values in this checkout's `.env` that differ from it are listed (the bot token by its bot ID) and copied once you confirm. Then it asks for whatever is still missing:
    - the bot token, which it validates with Telegram (it also warns if Threaded Mode is off);
    - your user ID: type it, or leave it empty, message the bot, and the script detects it;
    - the first project's directory.
@@ -176,7 +176,7 @@ Day-2 commands:
 | Command | What it does |
 |---|---|
 | `sudo bash deploy/deploy.sh check` | Read-only health check of the whole deployment (see below) |
-| `sudo bash deploy/deploy.sh update` | After `git pull`: copy the new code, reinstall dependencies, restart, verify |
+| `sudo bash deploy/deploy.sh update` | After `git pull` or a settings change: copy the new code, apply newer settings (as in step 5), reinstall dependencies, restart, verify |
 | `sudo bash deploy/deploy.sh claude …` | Run Claude Code as the service user, e.g. `claude mcp add …`, `claude plugin install …`, or `claude` to open the TUI |
 | `sudo bash deploy/deploy.sh status` / `logs` | Service status and recent logs, or follow logs |
 | `sudo bash deploy/deploy.sh uninstall [--purge]` | Remove the service (`--purge` also deletes `/opt/tg-cc-bot`) |
@@ -248,6 +248,7 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 
 | Symptom | Fix |
 |---|---|
+| Changed the bot token, but the script still shows the old bot | The service reads only `/opt/tg-cc-bot/.env`. Run `sudo bash deploy/deploy.sh update` (or `install`): it applies a token exported in your environment (not through a plain `sudo`, which drops it) and offers to copy one from this checkout's `.env`. After a switch to another bot, the chats saved for the old bot are forgotten; their sessions stay available with `/resume` |
 | Anything unclear | Run `sudo bash deploy/deploy.sh check` first; every ✗ comes with a hint |
 | The bot says Threaded Mode is off | Enable **Threaded Mode** in @BotFather → your bot → Bot Settings, then restart the bot |
 | Typing on the main screen doesn't open a new chat | In @BotFather's Threaded Mode settings, allow users to create topics |
@@ -258,7 +259,8 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 | I deleted a chat by mistake | Its session is kept on disk; reopen it with `/resume` |
 | Live preview doesn't update | Set `STREAM_MODE=edit` (the bot also falls back automatically if drafts fail) |
 | Bot doesn't respond at all | Check your ID is in `ALLOWED_USER_IDS`, you're in a private chat, and `journalctl -u tg-cc-bot` shows `polling` |
-| `409: Conflict` in the logs | Telegram serves one poller per bot token, and another client asked for this bot's updates at the same time. The bot itself polls from one loop only, however many chats and Claude sessions run. Re-run `sudo bash deploy/deploy.sh install`: it stops the bot first, lists every local process using the token (with how it was started), and asks Telegram whether anything else still polls before it starts the bot again. The bot keeps retrying meanwhile instead of crashing |
+| `409: Conflict` in the logs | Telegram serves one poller per bot token, and another client asked for this bot's updates at the same time. The bot itself polls from one loop only, however many chats and Claude sessions run. Common causes: Claude Code's Telegram plugin configured with this bot's token (a `claude` you run yourself loads it; the bot's own sessions don't), a second copy of the bot, or a copy on another machine. `sudo bash deploy/deploy.sh check` lists local processes and config files using the token, with how each was started. The bot keeps retrying meanwhile instead of crashing |
+| No commands after typing `/` | The bot sets the menu at start and again once Claude Code's commands are known (`menu: N commands` in the log; `deploy.sh check` shows the count). Reopen the chat if Telegram still shows an old menu |
 | Replies arrive while `deploy.sh` is still running | Expected once the "systemd service" step has started the bot: it answers messages sent while it was offline, while the script finishes its checks. Before that step nothing of tg-cc-bot runs (the script stops a running bot first) |
 
 ## Development

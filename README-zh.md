@@ -4,7 +4,7 @@
 
 用 Telegram 遥控服务器上的 **Claude Code**，用你自己的 **Claude 订阅（Pro/Max）登录**。和 bot 的**每个新对话就是一个独立的 Claude Code 会话**。
 
-底层是官方 [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) 驱动的、未修改的 Claude Code 进程。Agent 循环、工具、skills、CLAUDE.md、MCP、hooks、权限系统都由 Claude Code 自己处理。bot 负责收发消息、渲染输出、把提示变成按钮，并管理哪些会话需要有进程在跑。
+底层是官方 [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) 驱动的、未修改的 Claude Code 进程。系统提示词、Agent 循环、工具、skills、CLAUDE.md、MCP、hooks、权限系统都由 Claude Code 自己处理，bot 不额外加任何提示词。唯一的例外：bot 起的会话里会关掉 Claude Code 的 Telegram 频道插件，否则每个会话都会再去拉一遍这个 bot 的消息。bot 负责收发消息、渲染输出、把提示变成按钮，并管理哪些会话需要有进程在跑。
 
 > 合规说明：Anthropic 不允许把订阅 OAuth token 拿出来自己调 API（OpenClaw 那种做法）。这里由 Claude Code 二进制自己完成登录和请求，属于"用户用自己的订阅登录未修改的 Claude Code"。用量计入你的订阅额度，多个对话并行时消耗更快。2026 年 6 月那次"SDK 单独额度池"的改动已暂停，如果将来恢复，SDK 用量会改走单独额度。
 
@@ -123,7 +123,7 @@ sudo bash deploy/deploy.sh
 3. **Bun**：为这个账户安装；已有且版本够新就跳过。
 4. **应用**：把代码复制到 `/opt/tg-cc-bot` 并安装依赖。Agent SDK 会带上与自身版本匹配的 Claude Code，直接使用这个账户已有的登录。
 5. **配置**：
-   - 生成权限为 600 的 `.env`。
+   - 服务只读 `/opt/tg-cc-bot/.env`（权限 600）。环境变量里导出的设置会写进去（直接运行脚本、不加 `sudo`，它会自己用 `sudo -E` 重新运行；普通的 `sudo` 会丢掉环境变量）。这个 checkout 里 `.env` 中与它不同的值会列出来（bot token 只显示 bot ID），确认后复制过去。
    - 询问 bot token，并用 Telegram 接口验证；话题模式没开会提醒你。
    - 询问 user ID：可以直接填；也可以留空，然后给 bot 发一条消息，脚本会自动识别。
    - 询问第一个项目的目录。
@@ -135,7 +135,7 @@ sudo bash deploy/deploy.sh
 | 命令 | 作用 |
 |---|---|
 | `sudo bash deploy/deploy.sh check` | 只读的全面自查 |
-| `sudo bash deploy/deploy.sh update` | `git pull` 之后用：复制新代码、重装依赖、重启并自查 |
+| `sudo bash deploy/deploy.sh update` | `git pull` 或改了设置之后用：复制新代码、应用新的设置（同第 5 步）、重装依赖、重启并自查 |
 | `sudo bash deploy/deploy.sh claude …` | 以运行 bot 的账户身份运行 Claude Code，比如 `claude mcp add …`、`claude plugin install …`，或者直接 `claude` 打开终端界面 |
 | `sudo bash deploy/deploy.sh status` / `logs` | 查看服务状态和最近日志 / 实时跟踪日志 |
 | `sudo bash deploy/deploy.sh uninstall [--purge]` | 移除服务（`--purge` 同时删掉 `/opt/tg-cc-bot`） |
@@ -202,6 +202,7 @@ sudo bash deploy/deploy.sh
 
 | 现象 | 处理 |
 |---|---|
+| 换了 bot token，脚本显示的还是旧 bot | 服务只读 `/opt/tg-cc-bot/.env`。运行 `sudo bash deploy/deploy.sh update`（或 `install`）：它会应用环境变量里导出的 token（普通 `sudo` 会把环境变量丢掉），并询问是否复制这个 checkout 的 `.env` 里的 token。换成另一个 bot 后，为旧 bot 保存的对话绑定会被清掉，那些会话仍然可以用 `/resume` 打开 |
 | 不确定哪里有问题 | 先跑 `sudo bash deploy/deploy.sh check`，每个 ✗ 都附有修复提示 |
 | bot 提示 Threaded Mode 没开 | 在 @BotFather → 你的 bot → Bot Settings 里开启 **Threaded Mode**，然后重启 bot |
 | 在主屏幕打字不会新建对话 | 在 @BotFather 的 Threaded Mode 设置里允许用户创建话题 |
@@ -212,7 +213,8 @@ sudo bash deploy/deploy.sh
 | 误删了一个对话 | 会话还保存在磁盘上，用 `/resume` 重新打开 |
 | 流式预览不动 | 设置 `STREAM_MODE=edit`（drafts 不可用时 bot 也会自动切换） |
 | bot 完全没反应 | 确认你的 ID 在 `ALLOWED_USER_IDS` 里、用的是私聊，并且 `journalctl -u tg-cc-bot` 里有 `polling` |
-| 日志里有 `409: Conflict` | Telegram 规定一个 bot token 同时只有一个拉取者，而有另一个客户端同时在拉这个 bot 的消息。bot 自己无论开多少个对话和 Claude 会话，都只有一个拉取循环。重新运行 `sudo bash deploy/deploy.sh install`：它会先停掉 bot，列出本机所有用这个 token 的进程（以及它们是怎么启动的），并在重新启动 bot 之前向 Telegram 确认是否还有别的拉取者。在此期间 bot 会按间隔重试，不会崩溃 |
+| 日志里有 `409: Conflict` | Telegram 规定一个 bot token 同时只有一个拉取者，而有另一个客户端同时在拉这个 bot 的消息。bot 自己无论开多少个对话和 Claude 会话，都只有一个拉取循环。常见原因：Claude Code 的 Telegram 插件配置了这个 bot 的 token（你自己运行的 `claude` 会加载它；bot 自己的会话不会），bot 的第二个副本，或者另一台机器上的副本。`sudo bash deploy/deploy.sh check` 会列出本机用这个 token 的进程和配置文件，以及它们是怎么启动的。在此期间 bot 会按间隔重试，不会崩溃 |
+| 输入 `/` 没有命令列表 | bot 启动时会设置菜单，拿到 Claude Code 的命令后再更新一次（日志里是 `menu: N commands`；`deploy.sh check` 会显示数量）。如果 Telegram 还显示旧菜单，重新打开对话 |
 | `deploy.sh` 还没跑完就收到了回复 | 只要已经过了 “systemd service” 这一步就是正常的：bot 已经启动，正在回复它离线期间收到的消息，脚本还在做后续检查。在这一步之前 tg-cc-bot 不会运行（脚本一开始就会停掉正在运行的 bot） |
 
 ## 开发

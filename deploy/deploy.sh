@@ -13,7 +13,8 @@
 # Commands
 #   install     (default) Check prerequisites, install or upgrade, configure, start, then verify
 #   check       Read-only health check of an existing deployment
-#   update      Copy code from this checkout, reinstall dependencies, restart, verify
+#   update      Copy code from this checkout, apply newer settings, reinstall dependencies,
+#               restart, verify
 #   claude ...  Run Claude Code as the service user (e.g. `claude mcp list`)
 #   status      Service status and recent logs
 #   logs        Follow the service logs
@@ -29,6 +30,9 @@
 #   --no-live        Skip the live Claude round-trip test (it uses a few tokens of your plan)
 #   --purge          With `uninstall`: also delete the install directory
 #   -h, --help       Show this help
+#
+# Settings: the service reads only <dir>/.env. install and update write values exported in the
+# environment into it, and offer to copy differing values from this checkout's .env.
 #
 # Unattended install: export TELEGRAM_BOT_TOKEN and ALLOWED_USER_IDS (optionally
 # DEFAULT_CWD, DEFAULT_MODEL, DEFAULT_PERMISSION_MODE, ALLOWED_ROOTS,
@@ -139,11 +143,11 @@ confirm() {
   [[ $answer =~ ^[Yy] ]]
 }
 
-# env_get KEY: value from the .env file ('' when missing)
+# env_get KEY [FILE]: value from the service's .env, or FILE ('' when missing)
 env_get() {
-  [[ -f $ENV_FILE ]] || return 0
-  local line
-  line=$(grep -E "^[[:space:]]*$1=" "$ENV_FILE" | tail -n1 || true)
+  local file=${2:-$ENV_FILE} line
+  [[ -f $file ]] || return 0
+  line=$(grep -E "^[[:space:]]*$1=" "$file" | tail -n1 || true)
   line=${line#*=}
   line=${line%$'\r'}
   if [[ $line =~ ^\"(.*)\"$ || $line =~ ^\'(.*)\'$ ]]; then line=${BASH_REMATCH[1]}; fi
@@ -416,7 +420,17 @@ check_config() {
     hint "chmod 600 $ENV_FILE && chown $SVC_USER $ENV_FILE"
   fi
 
-  if valid_token "$TG_TOKEN"; then ok "TELEGRAM_BOT_TOKEN looks valid"; else bad "TELEGRAM_BOT_TOKEN missing or malformed"; fi
+  if valid_token "$TG_TOKEN"; then ok "TELEGRAM_BOT_TOKEN looks valid (bot ${TG_TOKEN%%:*})"; else bad "TELEGRAM_BOT_TOKEN missing or malformed"; fi
+
+  local pending key src val
+  pending=$(pending_settings)
+  if [[ -n $pending ]]; then
+    warn "Newer settings not applied yet (the service reads only $ENV_FILE):"
+    while IFS=$'\t' read -r key src val; do
+      hint "$key from $src: $(show_value "$key" "$(env_get "$key")") → $(show_value "$key" "$val")"
+    done <<<"$pending"
+    hint "Apply them: sudo $0 update"
+  fi
 
   local ids
   ids=$(normalize_ids "$(env_get ALLOWED_USER_IDS)")
@@ -538,22 +552,23 @@ check_telegram() {
   if [[ -n $hook ]]; then warn "A webhook is set ($hook); the bot removes it on start because it uses long polling"
   else ok "No webhook set (long polling)"; fi
   report_local_pollers bad || true
+  report_telegram_plugin
 
-  # Only when the bot is down: a test poll next to a running bot would itself cause a 409 there.
-  local state rc=0
-  state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
-  case $state in
-    active | activating | reloading | deactivating) ;;
-    *)
-      info "$SERVICE is ${state:-not installed}: asking Telegram whether anything polls @$BOT_USERNAME (up to ${POLL_PROBE_SECS}s)…"
-      probe_pollers || rc=$?
-      case $rc in
-        0) ok "Nothing polls @$BOT_USERNAME" ;;
-        1) bad "Another client polls @$BOT_USERNAME: $PROBE_EVIDENCE" ;;
-        *) warn "Could not check: $PROBE_EVIDENCE" ;;
-      esac
-      ;;
-  esac
+  # The menu Telegram shows after "/" (the bot sets it for private chats when it starts).
+  local menu n
+  menu=$(tg_api getMyCommands "scope=%7B%22type%22%3A%22all_private_chats%22%7D")
+  n=$(grep -o '"command":"' <<<"$menu" | wc -l | tr -d ' ')
+  if ((n > 0)); then ok "Command menu (after /): $n commands"
+  else warn "The command menu is empty; the bot sets it when it starts (look for 'menu:' in its log)"; fi
+}
+
+# Claude Code's Telegram channel plugin polls a bot from every Claude session that
+# loads it. The bot turns it off in the sessions it starts; say so when it is enabled.
+report_telegram_plugin() {
+  local settings=$SVC_HOME/.claude/settings.json
+  if [[ -f $settings ]] && grep -qE '"telegram@[^"]*"[[:space:]]*:[[:space:]]*true' "$settings"; then
+    info "Claude Code's Telegram plugin is enabled for $SVC_USER: off in the bot's sessions, but a \`claude\` you start yourself still loads it"
+  fi
 }
 
 # Print local processes (as LEVEL: bad or warn) and config files using the bot token.
@@ -566,7 +581,7 @@ report_local_pollers() {
     while IFS= read -r line; do hint "$line"; done <<<"$found"
     return 1
   elif [[ -n $found ]]; then
-    warn "Not running, but these would compete for the bot's messages when started:"
+    warn "Not running, but these would compete for the bot's messages when started (e.g. \`claude --channels\`):"
     while IFS= read -r line; do hint "$line"; done <<<"$found"
   else
     ok "No other process on this machine uses this bot token (environment, command line, working-directory .env)"
@@ -711,49 +726,6 @@ local_pollers() {
   fi
 }
 
-# With tg-cc-bot stopped, does anything still poll this bot? Telegram ends a waiting
-# getUpdates with 409 as soon as another client asks for updates, and pollers ask again
-# at least every ~30 s, so holding one open for POLL_PROBE_SECS either catches a second
-# poller or rules one out. No offset is sent, so no message is consumed here.
-# Returns 0 (nothing else polls), 1 (something does; PROBE_EVIDENCE says how we know)
-# or 2 (Telegram did not answer).
-POLL_PROBE_SECS=40
-PROBE_EVIDENCE=''
-probe_pollers() {
-  local start=$SECONDS left body first='' now
-  while :; do
-    left=$((POLL_PROBE_SECS - (SECONDS - start)))
-    ((left > 0)) || return 0
-    body=$(tg_api getUpdates "timeout=$left&limit=1" $((left + 15)))
-    case $body in
-      *'"error_code":409'*webhook*)
-        PROBE_EVIDENCE="a webhook is set for this bot, so Telegram sends its messages there instead"
-        return 1
-        ;;
-      *'"error_code":409'*)
-        PROBE_EVIDENCE="Telegram cut off a test request after $((SECONDS - start))s with 409 Conflict: another client asked for this bot's updates while $SERVICE was stopped"
-        return 1
-        ;;
-      *'"ok":true,"result":[]'*) ;;
-      *'"ok":true'*)
-        # Messages are waiting. Another poller would take and confirm them within seconds.
-        now=$(grep -o '"update_id":[0-9]*' <<<"$body" | head -n1 | cut -d: -f2)
-        if [[ -z $first ]]; then
-          first=$now
-        elif [[ $now != "$first" ]]; then
-          PROBE_EVIDENCE="another client received and confirmed update $first while $SERVICE was stopped"
-          return 1
-        fi
-        sleep 2
-        ;;
-      *)
-        PROBE_EVIDENCE="Telegram did not answer the test request: ${body:0:160}"
-        return 2
-        ;;
-    esac
-  done
-}
-
 # After a 409 in the bot's log: name local processes using the token, if any.
 explain_conflict() {
   local found line
@@ -762,8 +734,8 @@ explain_conflict() {
     hint "These use the same bot token on this machine (only one client may poll):"
     while IFS= read -r line; do hint "  $line"; done <<<"$found"
   else
-    hint "No other process here has the token in its environment, command line or working-directory .env"
-    hint "Run \`sudo $0 install\` again: it stops $SERVICE first and asks Telegram whether anything else still polls"
+    hint "No other process here has the token in its environment, command line or working-directory .env,"
+    hint "and the bot's own Claude sessions don't load Claude Code's Telegram plugin"
   fi
 }
 
@@ -833,6 +805,7 @@ check_service() {
 
   if grep -q 'Claude Code ready' <<<"$logs"; then
     ok "$(grep 'Claude Code ready' <<<"$logs" | tail -n1)"
+    if grep -q 'menu: [0-9]' <<<"$logs"; then ok "Telegram $(grep -o 'menu: [0-9].*' <<<"$logs" | tail -n1)"; fi
   elif grep -q 'warm-up failed' <<<"$logs"; then
     bad "Claude Code warm-up failed"
     explain_logs "$logs"
@@ -1059,6 +1032,81 @@ discover_user_ids() {
   return 1
 }
 
+# A setting's value as it may be shown: the bot token by its bot ID (public), other secrets masked.
+show_value() { # KEY VALUE
+  case $1 in
+    TELEGRAM_BOT_TOKEN) printf 'bot %s' "${2%%:*}" ;;
+    *TOKEN* | *KEY* | *SECRET*) printf '…%s' "${2: -4}" ;;
+    *) printf '%s' "${2:-(unset)}" ;;
+  esac
+}
+
+# The service reads only $ENV_FILE. Newer values may sit in two other places: the
+# environment (sudo -E …) and a .env in this checkout (the one a local run uses).
+# Prints "KEY<TAB>source<TAB>value" for each value that differs from $ENV_FILE;
+# the environment wins over the checkout's .env.
+pending_settings() {
+  local key val
+  if ((${#FROM_ENV[@]})); then
+    for key in "${!FROM_ENV[@]}"; do
+      if [[ ${FROM_ENV[$key]} != "$(env_get "$key")" ]]; then printf '%s\tenvironment\t%s\n' "$key" "${FROM_ENV[$key]}"; fi
+    done
+  fi
+  [[ -f $SRC_DIR/.env && ! $SRC_DIR/.env -ef $ENV_FILE ]] || return 0
+  while IFS= read -r key; do
+    [[ -n ${FROM_ENV[$key]:-} ]] && continue
+    val=$(env_get "$key" "$SRC_DIR/.env")
+    if [[ -n $val && $val != "$(env_get "$key")" ]]; then printf '%s\t%s\t%s\n' "$key" "$SRC_DIR/.env" "$val"; fi
+  done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$SRC_DIR/.env" | sort -u)
+}
+
+# Write pending values into $ENV_FILE: those from the environment always (that is how
+# unattended installs configure), those from the checkout's .env after a confirmation.
+apply_overrides() {
+  local pending key src val
+  pending=$(pending_settings)
+  [[ -n $pending ]] || return 0
+  local -a from_file=()
+  while IFS=$'\t' read -r key src val; do
+    if [[ $src == environment ]]; then
+      env_set "$key" "$val"
+      ok "$key set from the environment ($(show_value "$key" "$val"))"
+    else
+      from_file+=("$key")
+    fi
+  done <<<"$pending"
+  ((${#from_file[@]})) || return 0
+  warn "$SRC_DIR/.env has other values than $ENV_FILE, which is the file the service reads:"
+  for key in "${from_file[@]}"; do
+    hint "$key: $(show_value "$key" "$(env_get "$key")") → $(show_value "$key" "$(env_get "$key" "$SRC_DIR/.env")")"
+  done
+  # Suggest copying only when the checkout's file is the newer one (edited since the last run).
+  local suggest=y
+  if [[ ! $SRC_DIR/.env -nt $ENV_FILE ]]; then
+    suggest=n
+    info "$ENV_FILE was changed more recently, so it is probably the one to keep"
+  fi
+  if is_interactive && confirm "Copy these values to $ENV_FILE?" "$suggest"; then
+    for key in "${from_file[@]}"; do env_set "$key" "$(env_get "$key" "$SRC_DIR/.env")"; done
+    ok "Copied ${from_file[*]} from $SRC_DIR/.env"
+  else
+    info "Kept $ENV_FILE as it is (edit it, or re-run interactively to copy them)"
+  fi
+}
+
+# Check TG_TOKEN with Telegram and say which bot it is and where it comes from.
+verify_token() {
+  local body
+  body=$(tg_api getMe)
+  [[ $body == *'"ok":true'* ]] || die "Telegram rejected the bot token (bot ${TG_TOKEN%%:*}): ${body:0:200}"
+  BOT_USERNAME=$(json_str "$body" username)
+  ok "Bot token valid: @$BOT_USERNAME (bot ${TG_TOKEN%%:*}, saved in $ENV_FILE)"
+  if [[ $body != *'"has_topics_enabled":true'* ]]; then
+    warn "Threaded Mode is off for @$BOT_USERNAME: every Claude session lives in a tab, so enable it now"
+    hint "@BotFather → @$BOT_USERNAME → Bot Settings → Threaded Mode (the bot picks it up on restart)"
+  fi
+}
+
 step_config() {
   section "Configuration"
   if [[ ! -f $ENV_FILE ]]; then
@@ -1067,17 +1115,7 @@ step_config() {
   fi
   chown "$SVC_USER:$SVC_GROUP" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-
-  # Values passed through the environment win (unattended installs).
-  local key
-  if ((${#FROM_ENV[@]})); then
-    for key in "${!FROM_ENV[@]}"; do
-      if [[ ${FROM_ENV[$key]} != "$(env_get "$key")" ]]; then
-        env_set "$key" "${FROM_ENV[$key]}"
-        ok "$key set from the environment"
-      fi
-    done
-  fi
+  apply_overrides
 
   # Bot token
   TG_TOKEN=$(env_get TELEGRAM_BOT_TOKEN)
@@ -1092,16 +1130,8 @@ step_config() {
       warn "That doesn't look like a bot token (format 123456789:AA…)"
     done
   fi
-  local body
-  body=$(tg_api getMe)
-  [[ $body == *'"ok":true'* ]] || die "Telegram rejected the bot token: ${body:0:200}"
-  BOT_USERNAME=$(json_str "$body" username)
+  verify_token
   env_set TELEGRAM_BOT_TOKEN "$TG_TOKEN"
-  ok "Bot token valid: @$BOT_USERNAME"
-  if [[ $body != *'"has_topics_enabled":true'* ]]; then
-    warn "Threaded Mode is off for @$BOT_USERNAME: every Claude session lives in a tab, so enable it now"
-    hint "@BotFather → @$BOT_USERNAME → Bot Settings → Threaded Mode (the bot picks it up on restart)"
-  fi
 
   # Allowed users
   local ids
@@ -1255,20 +1285,7 @@ step_single_poller() {
   if ! report_local_pollers bad; then
     stop_local_pollers "$(local_pollers)" || die "Not started: stop the processes above (or give $SERVICE its own bot token), then re-run"
   fi
-
-  info "Asking Telegram whether anything else polls $bot while $SERVICE is stopped (up to ${POLL_PROBE_SECS}s)…"
-  local rc=0
-  probe_pollers || rc=$?
-  case $rc in
-    0) ok "Nothing else polled $bot in ${POLL_PROBE_SECS}s" ;;
-    1)
-      bad "Another client polls $bot: $PROBE_EVIDENCE"
-      hint "It is none of this machine's processes with the token in their environment, command line or working-directory .env"
-      hint "Stop it wherever it runs, or create a separate bot for $SERVICE in @BotFather"
-      confirm "Start $SERVICE anyway (the two will split $bot's messages)?" n || die "Not started: another client polls $bot"
-      ;;
-    *) warn "Could not check: $PROBE_EVIDENCE" ;;
-  esac
+  report_telegram_plugin
 }
 
 # Offer to stop local processes that use the bot token (from local_pollers).
@@ -1332,6 +1349,11 @@ cmd_update() {
   stop_service_if_running
   step_bun
   step_code
+  section "Configuration"
+  apply_overrides
+  resolve_paths
+  valid_token "$TG_TOKEN" || die "No valid TELEGRAM_BOT_TOKEN in $ENV_FILE; run: sudo $0 install --reconfigure"
+  verify_token
   step_single_poller
   step_service
   self_check

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { RunnerHandle } from "@grammyjs/runner";
 import { GrammyError, type Bot } from "grammy";
-import { claudeEnv } from "../src/claude/process.ts";
+import { claudeEnv, SESSION_FLAG_SETTINGS } from "../src/claude/process.ts";
 import type { Logger } from "../src/core/logger.ts";
 import { defaultConflictDelay, Poller } from "../src/telegram/polling.ts";
 import { waitFor } from "./helpers/fake-process.ts";
@@ -99,4 +99,8 @@ test("Claude Code processes never see the bot token", () => {
   assert.equal(env.PATH, "/bin");
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-x", "Claude's own login token is kept");
   assert.equal(env.CLAUDE_AGENT_SDK_CLIENT_APP, "tg-cc-bot");
+});
+
+test("sessions started by the bot never load Claude Code's own Telegram poller", () => {
+  assert.equal(SESSION_FLAG_SETTINGS.enabledPlugins["telegram@claude-plugins-official"], false);
 });

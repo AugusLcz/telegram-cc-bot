@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-02
+
+### Fixed
+
+- Sessions ran without Claude Code's system prompt: left unset, the Agent SDK sends an empty one.
+  They now use Claude Code's own (the bot adds nothing). Chats that already started keep the prompt
+  they were recorded with until `/compact` or `/clear`.
+- Claude Code's Telegram channel plugin, when installed for the bot's account, was loaded into every
+  session the bot started and polled the bot too: the cause of the 409 Conflicts. It is now turned
+  off in the bot's sessions, and `deploy.sh` says when it is enabled for the account.
+- The `/` menu could stay without Claude Code's commands: it was set only for the default scope, so
+  a menu set for private chats or a chat (by another program, earlier) hid it, and a rejected list
+  left nothing. It is now set for the default scope, all private chats and each allowed user's
+  chat; if Telegram rejects the full list, the bot's own commands still go in. The log reports
+  `menu: N commands`, and `deploy.sh check` shows the count Telegram has.
+
+- Changing the bot token had no effect on a re-run of `deploy.sh`: the service reads only the
+  install directory's `.env`, the checkout's `.env` was never looked at, and `update` ignored
+  exported settings. `install` and `update` now apply exported settings and list the values in
+  the checkout's `.env` that differ (the token by its bot ID), copying them once confirmed (suggested
+  only when that file is the newer one);
+  `check` reports settings not applied yet, and the token check names the bot and the file.
+- After a switch to another bot, a new chat could land on a session of the old bot's chat with the
+  same number. Chat ↔ session bindings now belong to the bot they were made with and are dropped
+  when the bot changes; the sessions stay available via `/resume`.
+
+### Removed
+
+- The 40-second Telegram check in `deploy.sh install`, `update` and `check`; the local check for
+  processes and config files using the token stays.
+
+### Documentation
+
+- The Quick start says it is for a local run and not to combine it with a server deployment.
+
 ## [0.2.0] - 2026-10-02
 
 ### Changed
@@ -80,6 +115,7 @@ First release.
   real Bot API spike script (`scripts/topics-spike.ts`).
 - Architecture document, English and Chinese READMEs, 66 tests.
 
-[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AugusLcz/telegram-cc-bot/releases/tag/v0.1.0

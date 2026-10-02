@@ -4,6 +4,7 @@ import { SdkProcessFactory } from "./claude/process.ts";
 import { sdkSessionApi } from "./claude/sessions.ts";
 import { loadConfig } from "./core/config.ts";
 import { acquireInstanceLock } from "./core/instance-lock.ts";
+import { claimStateForBot } from "./domain/chats.ts";
 import { createLogger } from "./core/logger.ts";
 import { JsonFileStore } from "./store/store.ts";
 import { Poller } from "./telegram/polling.ts";
@@ -39,6 +40,10 @@ const botInfo = {
 if (!botInfo.hasTopics) log.warn("Threaded Mode is off in @BotFather: the bot cannot keep separate sessions until it is enabled");
 
 const store = new JsonFileStore(cfg.stateFile, { log: log.child("store") });
+const dropped = claimStateForBot(store, me.id);
+if (dropped) {
+  log.warn(`the saved chats belong to another bot (or an older version): forgot ${dropped} chat ↔ session binding(s); the sessions stay available via /resume`);
+}
 const factory = new SdkProcessFactory({ claudePath: cfg.claudePath, log: log.child("claude") });
 const app = createApp({ cfg, bot, botInfo, factory, store, sessions: sdkSessionApi, log });
 
