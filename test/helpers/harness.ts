@@ -46,6 +46,8 @@ export function harness(opts: HarnessOptions = {}) {
   const bot = new Bot(cfg.botToken, { botInfo });
 
   const calls: Call[] = [];
+  /** Messages the bot sent, with the IDs the fake API gave them. */
+  const messages: { id: number; payload: Record<string, unknown> }[] = [];
   const goneThreads = new Set<number>();
   let messageId = 1000;
   let threadId = 900; // topics the bot creates itself (/resume, /fork)
@@ -60,7 +62,9 @@ export function harness(opts: HarnessOptions = {}) {
     }
     let result: unknown = true;
     if (method === "sendMessage" || method === "sendDocument") {
-      result = { message_id: messageId++, date: 0, chat: { id: p.chat_id, type: "private" }, text: p.text };
+      const id = messageId++;
+      if (method === "sendMessage") messages.push({ id, payload: p });
+      result = { message_id: id, date: 0, chat: { id: p.chat_id, type: "private" }, text: p.text };
     } else if (method === "createForumTopic") {
       result = { message_thread_id: threadId++, name: p.name, icon_color: 0 };
     }
@@ -121,7 +125,7 @@ export function harness(opts: HarnessOptions = {}) {
     } as unknown as Update;
   };
   const send = (text: string, opts: SendOpts = {}) => bot.handleUpdate(message(text, opts));
-  const press = (data: string, thread?: number) =>
+  const press = (data: string, thread?: number, messageId = 1) =>
     bot.handleUpdate({
       update_id: updateId++,
       callback_query: {
@@ -130,7 +134,7 @@ export function harness(opts: HarnessOptions = {}) {
         chat_instance: "c",
         data,
         message: {
-          message_id: 1,
+          message_id: messageId,
           date: 0,
           chat: { id: OWNER, type: "private", first_name: "U" },
           ...(thread ? { message_thread_id: thread, is_topic_message: true } : {}),
@@ -142,5 +146,5 @@ export function harness(opts: HarnessOptions = {}) {
     calls.filter((c) => c.method === "sendMessage" && filter(c)).map((c) => String(c.payload.text));
   const inThread = (t?: number) => (c: Call) => c.payload.message_thread_id === t;
 
-  return { app: app as App, bot, calls, goneThreads, factory, store, message, send, press, texts, inThread, home, other };
+  return { app: app as App, bot, calls, messages, goneThreads, factory, store, message, send, press, texts, inThread, home, other };
 }

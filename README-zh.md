@@ -46,7 +46,7 @@
 | `/close` | 立即关闭这个对话的进程；下一条消息会自动恢复 |
 | `/delete` | 确认后删除对话及其消息（会话本身保留，仍可恢复） |
 | `/plan [任务]` | 把这个对话切到 plan 模式；带任务时直接发出去 |
-| `/skills` | 这里能用的 skills：你的（用户、项目、插件）在前，然后是 Claude Code 自带的；点一下就运行 |
+| `/skills [关键词]` | 在一条消息里浏览这里能用的 skills：分“你的”（用户、项目、插件）和 Claude Code 自带两个标签，每页 8 个；点一个看完整说明，并有按钮复制 `/名字 ` 方便加参数；`/skills stock` 可以筛选 |
 | `/agents` | Claude 在这里能用的 subagent |
 | `/mcp [reconnect\|enable\|disable <服务器\|all>]` | 这个会话的 MCP 服务器及状态，带重连 / 启用 / 停用按钮 |
 | `/tasks`（`/bashes`） | 这个会话的后台任务（shell、subagent 等），带停止按钮 |

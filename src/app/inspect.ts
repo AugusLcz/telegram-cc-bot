@@ -5,7 +5,7 @@ import type { McpServerStatus, SlashCommand } from "@anthropic-ai/claude-agent-s
 import { InlineKeyboard, type Context } from "grammy";
 import { withProbe } from "../claude/catalog.ts";
 import { claudeCli } from "../claude/cli.ts";
-import { commandKind, toTelegramName } from "../claude/cmdnames.ts";
+import { toTelegramName } from "../claude/cmdnames.ts";
 import { hooksView, instructionFiles, permissionsView, settingsSources, type SettingsSource } from "../claude/config-files.ts";
 import { claudeEnv, type ProcessHandle, type TaskInfo } from "../claude/process.ts";
 import type { TranscriptEntry } from "../claude/sessions.ts";
@@ -23,15 +23,16 @@ import { relTime, reply } from "./views.ts";
 /**
  * Commands that show (and for MCP servers, plugins and tasks, manage) what a
  * chat's Claude Code session has: Telegram versions of Claude Code's terminal
- * screens (/skills, /mcp, /tasks, /diff …). None of them talk to Claude.
+ * screens (/agents, /mcp, /tasks, /diff …; /skills lives in skills.ts). None of
+ * them talk to Claude.
  */
 
-type Run = (app: App, input: CommandInput) => Promise<void>;
+export type Run = (app: App, input: CommandInput) => Promise<void>;
 
 const MESSAGE_LIMIT = 3800;
 
 /** Where this chat's session works: its record, else the active project. Creates no record. */
-function chatCwd(app: App, input: CommandInput): string {
+export function chatCwd(app: App, input: CommandInput): string {
   const record = input.key ? app.threads.get(input.key) : undefined;
   return record?.cwd ?? app.projects.activeFor(input.target.chatId).path;
 }
@@ -40,7 +41,7 @@ function chatCwd(app: App, input: CommandInput): string {
  * Ask this chat's running Claude Code process, or, when none runs, a throwaway
  * one in the chat's directory (no message, no transcript, no pool slot).
  */
-async function inspect<T>(app: App, input: CommandInput, fn: (h: ProcessHandle) => Promise<T>): Promise<T> {
+export async function inspect<T>(app: App, input: CommandInput, fn: (h: ProcessHandle) => Promise<T>): Promise<T> {
   const live = input.key ? app.pool.get(input.key) : undefined;
   if (live) return fn(live);
   const record = input.key ? app.threads.get(input.key) : undefined;
@@ -63,37 +64,31 @@ async function replyLines(app: App, ctx: Context, lines: string[], keyboard?: In
   for (let i = 0; i < messages.length; i++) await reply(app, ctx, messages[i], i === messages.length - 1 ? keyboard : undefined);
 }
 
-const code = (s: string) => `<code>${escapeHtml(s)}</code>`;
-const oneLine = (s: string, limit: number) => escapeHtml(truncate(s.replace(/\s+/g, " ").trim(), limit));
+export const code = (s: string) => `<code>${escapeHtml(s)}</code>`;
+export const oneLine = (s: string, limit: number) => escapeHtml(truncate(s.replace(/\s+/g, " ").trim(), limit));
 
-// ---- /skills, /agents ------------------------------------------------------------
+// ---- skills helpers, /agents -------------------------------------------------------
 
 /** One row per name; a row Claude Code marks as its own wins, as it does when running /name. */
-function uniqueCommands(cmds: SlashCommand[]): SlashCommand[] {
+export function uniqueCommands(cmds: SlashCommand[]): SlashCommand[] {
   const byName = new Map<string, SlashCommand>();
   for (const c of cmds) if (!byName.has(c.name) || c.builtin) byName.set(c.name, c);
   return [...byName.values()];
 }
 
-function skillLine(c: SlashCommand, botNames: ReadonlySet<string>): string {
-  const tg = toTelegramName(c.name);
-  // Tappable when Telegram can link it and it doesn't land on a bot command of the same spelling.
-  const name = tg && !botNames.has(tg) ? `/${tg}` : code(`/${c.name}`);
-  const hint = c.argumentHint ? ` <i>${escapeHtml(c.argumentHint)}</i>` : "";
-  return `${name}${hint}${c.description ? ` — ${oneLine(c.description, 140)}` : ""}`;
+/** How to type a command in Telegram: its menu spelling, unless Telegram can't spell it or it is a bot command. */
+export function typedName(name: string, botNames: ReadonlySet<string>): string {
+  const tg = toTelegramName(name);
+  return tg && !botNames.has(tg) ? tg : name;
 }
 
-const skills: Run = async (app, input) => {
-  const cmds = uniqueCommands(await inspect(app, input, (h) => h.supportedCommands()));
-  app.catalog.learn(cmds.map((c) => c.name));
-  const botNames = app.commands.names();
-  const own = cmds.filter((c) => commandKind(c, botNames) === "own-skill");
-  const bundled = cmds.filter((c) => commandKind(c, botNames) === "skill");
-  const lines = [`<b>Skills</b> · ${code(chatCwd(app, input))}`, "Tap one to run it, or type it with arguments.", "", "<b>Yours</b> (user, project, plugins)"];
-  lines.push(...(own.length ? own.map((c) => skillLine(c, botNames)) : ["None yet. Add one as ~/.claude/skills/&lt;name&gt;/SKILL.md, or in the project's .claude/skills/."]));
-  if (bundled.length) lines.push("", "<b>Claude Code</b>", ...bundled.map((c) => skillLine(c, botNames)));
-  await replyLines(app, input.ctx, lines);
-};
+/** "/name <hint> — description"; the name is tappable when Telegram can link it. */
+export function skillLine(c: SlashCommand, botNames: ReadonlySet<string>, descLimit = 140): string {
+  const typed = typedName(c.name, botNames);
+  const name = typed === toTelegramName(c.name) ? `/${typed}` : code(`/${c.name}`);
+  const hint = c.argumentHint ? ` <i>${escapeHtml(c.argumentHint)}</i>` : "";
+  return `${name}${hint}${c.description ? ` — ${oneLine(c.description, descLimit)}` : ""}`;
+}
 
 const agents: Run = async (app, input) => {
   const list = await inspect(app, input, (h) => h.supportedAgents());
@@ -423,7 +418,6 @@ const plugin: Run = async (app, input) => {
 
 export function registerInspect(app: App): void {
   app.commands
-    .register({ name: "skills", group: "chat", description: "Skills you can run in this chat", run: skills })
     .register({ name: "agents", group: "chat", description: "Subagents Claude can use here", run: agents })
     .register(mcp)
     .register(tasks)

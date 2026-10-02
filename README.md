@@ -73,7 +73,7 @@ All bot commands work in every chat and don't involve Claude.
 | `/close` | Stop this chat's process now; your next message resumes it |
 | `/delete` | Delete the chat and its messages after confirmation (the session stays resumable) |
 | `/plan [task]` | Switch this chat to plan mode; with a task, send it right away |
-| `/skills` | Skills you can run here: yours (user, project, plugins) first, then Claude Code's; tap one to run it |
+| `/skills [filter]` | Browse the skills you can run here in one message: tabs for yours (user, project, plugins) and Claude Code's, 8 per page; tap one for its description and a button that copies `/name ` for adding arguments; `/skills stock` filters |
 | `/agents` | Subagents Claude can use here |
 | `/mcp [reconnect\|enable\|disable <server\|all>]` | This session's MCP servers and their state, with Reconnect / Enable / Disable buttons |
 | `/tasks` (`/bashes`) | Background tasks of this session (shells, subagents…), with Stop buttons |

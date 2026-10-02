@@ -38,33 +38,6 @@ test("commandKind: menu commands, bundled skills, own skills, hidden built-ins",
 
 // ---- /skills, /agents ------------------------------------------------------------
 
-test("/skills lists the chat's skills, yours first, tappable; menu commands are not repeated", async () => {
-  const h = harness();
-  h.factory.onCreate = (p) => {
-    p.commands = [
-      { name: "compact", description: "Free up context", argumentHint: "", builtin: true },
-      { name: "code-review", description: "Review a change", argumentHint: "[path]", builtin: true },
-      { name: "theme", description: "Theme", argumentHint: "", builtin: true },
-      { name: "deploy-docs", description: "Publish the docs", argumentHint: "<env>" },
-      { name: "plugin:Long-Name", description: "From a plugin", argumentHint: "" },
-    ];
-  };
-  await talk(h, 500);
-  await h.send("/skills", { thread: 500 });
-  const text = lastText(h, 500);
-  assert.equal(h.factory.created.length, 1, "the live process answered; no probe");
-  assert.match(text, /<b>Yours<\/b>[\s\S]*\/deploy_docs <i>&lt;env&gt;<\/i> — Publish the docs/);
-  assert.match(text, /\/plugin_long_name — From a plugin/);
-  assert.match(text, /<b>Claude Code<\/b>[\s\S]*\/code_review <i>\[path\]<\/i> — Review a change/);
-  assert.ok(text.indexOf("deploy_docs") < text.indexOf("code_review"), "yours first");
-  assert.ok(!text.includes("/compact") && !text.includes("/theme"), "commands and terminal-only built-ins are not skills");
-
-  // A project skill the global catalog never saw resolves by its menu spelling now.
-  await h.send("/deploy_docs staging", { thread: 500 });
-  await waitFor(() => h.factory.created[0].sent.length === 2, 1000, "skill sent");
-  assert.equal(h.factory.created[0].sent[1], "/deploy-docs staging");
-});
-
 test("/skills and /agents in a chat without a session ask a throwaway process and leave nothing behind", async () => {
   const h = harness();
   h.factory.onCreate = (p) => {

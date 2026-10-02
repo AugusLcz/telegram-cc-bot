@@ -25,6 +25,7 @@ import { titleFromPrompt, TelegramTopics } from "../telegram/topics.ts";
 import { RendererRegistry, type App, type BotInfo } from "./context.ts";
 import { registerControl } from "./control.ts";
 import { registerInspect } from "./inspect.ts";
+import { registerSkills } from "./skills.ts";
 import { CallbackRouter, CommandRegistry } from "./registry.ts";
 import { handleThreadInput, passThrough, registerThread } from "./thread.ts";
 import { NO_CHAT_HINT, reply, replyTo, THREADED_MODE_HINT } from "./views.ts";
@@ -163,6 +164,7 @@ export function createApp(opts: CreateAppOptions): App {
 
   registerControl(app);
   registerThread(app);
+  registerSkills(app);
   registerInspect(app);
   installHandlers(app, bot);
   return app;

@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `/skills` is a browser in one message instead of a long list. Tabs separate yours from Claude Code's,
+  with 8 skills per page in two columns and ◀ ▶ to page through. Tapping a skill shows its full
+  description and a button that copies `/name ` for adding arguments. `/skills <words>` filters, and a
+  single match opens its details.
+
 ## [0.3.0] - 2026-10-02
 
 ### Added
