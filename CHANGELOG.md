@@ -21,6 +21,12 @@ All notable changes to this project are documented here. The format follows
   so that background helpers they leave behind (such as Claude Code's auto-updater) can't block the
   script; checks also disable Claude Code's auto-update and non-essential traffic. A timeout now
   produces a clear message instead of waiting.
+- A 409 Conflict (another program polling the same bot token) crashed the bot, and systemd restarted
+  it every 5 seconds, so the two pollers kept stealing each other's messages. The bot now logs the
+  conflict clearly and retries with backoff (15 s up to 5 min); an invalid token (401) exits once.
+- Claude Code sessions no longer inherit `TELEGRAM_BOT_TOKEN` from the bot.
+- `deploy.sh check` lists local processes and known config files (OpenClaw, Claude Code's Telegram
+  channel) that use the same bot token, and says so when the other poller must be elsewhere.
 
 ### Removed
 

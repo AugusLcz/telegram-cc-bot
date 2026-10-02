@@ -1,11 +1,11 @@
 import { autoRetry } from "@grammyjs/auto-retry";
-import { run } from "@grammyjs/runner";
 import { Bot } from "grammy";
 import { SdkProcessFactory } from "./claude/process.ts";
 import { sdkSessionApi } from "./claude/sessions.ts";
 import { loadConfig } from "./core/config.ts";
 import { createLogger } from "./core/logger.ts";
 import { JsonFileStore } from "./store/store.ts";
+import { Poller } from "./telegram/polling.ts";
 import { createApp, syncMenu } from "./app/bot.ts";
 
 const cfg = loadConfig();
@@ -46,7 +46,12 @@ app.catalog
   .then(() => log.info(`Claude Code ready: ${app.catalog.commands.length} commands, ${app.catalog.models.length} models`))
   .catch((err) => log.error("Claude Code warm-up failed (will retry on first message):", err));
 
-const runner = run(bot, { runner: { fetch: { allowed_updates: ["message", "callback_query"] } } });
+// Long polling; a 409 (another poller on this token) is retried with backoff instead of crashing.
+const poller = new Poller(bot, {
+  log: log.child("telegram"),
+  onFatal: () => process.exit(1),
+});
+poller.start();
 log.info(
   `@${botInfo.username} polling · tabs ${botInfo.hasTopics ? "on" : "OFF"} · max ${cfg.maxLiveSessions} live sessions · idle ${cfg.sessionIdleMs / 60_000}m`,
 );
@@ -59,7 +64,7 @@ async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   log.info(`${signal} received, shutting down`);
-  if (runner.isRunning()) await runner.stop();
+  await poller.stop();
   app.broker.cancelAll();
   await app.pool.shutdown();
   await store.flush();

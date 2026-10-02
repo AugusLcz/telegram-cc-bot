@@ -212,6 +212,7 @@ sudo bash deploy/deploy.sh
 | 误删了一个对话 | 会话还保存在磁盘上，用 `/resume` 重新打开 |
 | 流式预览不动 | 设置 `STREAM_MODE=edit`（drafts 不可用时 bot 也会自动切换） |
 | bot 完全没反应 | 确认你的 ID 在 `ALLOWED_USER_IDS` 里、用的是私聊，并且 `journalctl -u tg-cc-bot` 里有 `polling` |
+| 日志里有 `409: Conflict`，或者有不知道从哪来的回复 | 有别的程序在用同一个 bot token 拉取消息：手动启动的 `bun src/index.ts`、OpenClaw、`claude --channels` 会话，或者另一台机器上的副本。Telegram 规定一个 token 同时只能有一个拉取者。`sudo bash deploy/deploy.sh check` 会列出本机上的这类程序。把它停掉，或者给 tg-cc-bot 单独建一个 bot。在此期间 bot 会按间隔重试，不会崩溃 |
 
 ## 开发
 

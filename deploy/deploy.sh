@@ -527,6 +527,14 @@ check_telegram() {
   hook=$(json_str "$(tg_api getWebhookInfo)" url)
   if [[ -n $hook ]]; then warn "A webhook is set ($hook); the bot removes it on start because it uses long polling"
   else ok "No webhook set (long polling)"; fi
+  local holders line
+  holders=$(token_holders)
+  if [[ -n $holders ]]; then
+    warn "Something else on this machine also uses this bot token (only one poller may run):"
+    while IFS= read -r line; do hint "$line"; done <<<"$holders"
+  else
+    ok "No other process or known config on this machine uses this bot token"
+  fi
 }
 
 check_claude_auth() {
@@ -589,11 +597,55 @@ service_logs() {
   else journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true; fi
 }
 
+# Local processes (other than the bot itself) and known config files that hold
+# this bot's token: the usual suspects when Telegram reports 409 Conflict.
+# The token is handed to grep through a file descriptor, never on a command line.
+token_holders() {
+  [[ -n $TG_TOKEN ]] || return 0
+  local main skip f pid
+  main=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)
+  skip=" ${main:-0} $$ $(pgrep -P "${main:-0}" 2>/dev/null | tr '\n' ' ') "
+  for f in /proc/[0-9]*/environ /proc/[0-9]*/cmdline; do
+    pid=${f#/proc/}
+    pid=${pid%%/*}
+    [[ $skip == *" $pid "* ]] && continue
+    if grep -qaF -f <(printf '%s\n' "$TG_TOKEN") "$f" 2>/dev/null; then
+      local cmd
+      cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
+      cmd=${cmd//"$TG_TOKEN"/<bot token>}
+      printf 'process %s: %s\n' "$pid" "${cmd:0:160}"
+    fi
+  done | sort -u
+  local dirs=() d
+  for d in /root/.openclaw /home/*/.openclaw /root/.claude/channels /home/*/.claude/channels; do
+    if [[ -d $d ]]; then dirs+=("$d"); fi
+  done
+  if ((${#dirs[@]})); then
+    grep -rlsF -f <(printf '%s\n' "$TG_TOKEN") "${dirs[@]}" 2>/dev/null | sed 's/^/config file: /' || true
+  fi
+}
+
+# List token holders as hints, or say the other poller is elsewhere.
+explain_conflict() {
+  local holders line
+  holders=$(token_holders)
+  if [[ -n $holders ]]; then
+    hint "Also using this bot token on this machine; stop it (or give this bot its own token):"
+    while IFS= read -r line; do hint "  $line"; done <<<"$holders"
+  else
+    hint "Nothing else on this machine holds the token, so the other poller runs elsewhere"
+    hint "(another server, your laptop, OpenClaw…). Stop it, or create a separate bot for tg-cc-bot in @BotFather"
+  fi
+}
+
 # Print hints for known failure signatures in the bot's logs.
 explain_logs() {
   local logs=$1
   if [[ $logs == *"401: Unauthorized"* ]]; then hint "Telegram rejected the bot token: update TELEGRAM_BOT_TOKEN"; fi
-  if [[ $logs == *"409: Conflict"* ]]; then hint "Another process polls this bot token (e.g. a dev copy). Only one instance may run"; fi
+  if [[ $logs == *"409: Conflict"* ]]; then
+    hint "Another process polls this bot token (Telegram allows only one)"
+    explain_conflict
+  fi
   if [[ $logs == *"is required"* ]]; then hint "A required setting is missing in $ENV_FILE"; fi
   if [[ $logs == *"warm-up failed"* ]]; then hint "Claude Code could not start: see the Application and Claude sign-in checks"; fi
   if [[ $logs == *EACCES* ]]; then hint "Permission denied: check ownership of $INSTALL_DIR and DEFAULT_CWD"; fi
@@ -634,6 +686,11 @@ check_service() {
   if ((restarts > 0)); then
     warn "Restarted $restarts time(s) since the unit was started"
     explain_logs "$(journalctl -q --no-pager -o cat -u "$SERVICE" -n 200 2>/dev/null || true)"
+  fi
+
+  if grep -q '409: Conflict' <<<"$logs"; then
+    bad "Telegram reports 409 Conflict: another process polls this bot token, so the two steal each other's messages"
+    explain_conflict
   fi
 
   if grep -q ' polling ' <<<"$logs"; then
@@ -1024,10 +1081,16 @@ wait_ready() {
 }
 
 stop_service_if_running() {
-  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
-    systemctl stop "$SERVICE"
-    info "Stopped $SERVICE for the upgrade"
-  fi
+  # "activating" covers a unit waiting to auto-restart after a crash: it would start polling again
+  # in the middle of the install (and clash with the script's own getUpdates when detecting your ID).
+  local state
+  state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
+  case $state in
+    active | activating | reloading | deactivating)
+      systemctl stop "$SERVICE"
+      info "Stopped $SERVICE ($state) for the upgrade"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------

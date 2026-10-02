@@ -64,6 +64,20 @@ export interface SdkProcessOptions {
   log?: Logger;
 }
 
+/** Bot settings that must never reach Claude Code, nor the tools and MCP servers it runs. */
+const BOT_ONLY_ENV = ["TELEGRAM_BOT_TOKEN"];
+
+/**
+ * Environment for Claude Code processes: the bot's own minus its secrets. A
+ * session that saw TELEGRAM_BOT_TOKEN could leak it, or start a second poller
+ * on the same bot (anything reading that variable, e.g. this bot's own code).
+ */
+export function claudeEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...base, CLAUDE_AGENT_SDK_CLIENT_APP: "tg-cc-bot" };
+  for (const key of BOT_ONLY_ENV) delete env[key];
+  return env;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout;
   return Promise.race([
@@ -115,6 +129,7 @@ export class SdkProcess implements ProcessHandle {
         includePartialMessages: true,
         settingSources: ["user", "project", "local"],
         canUseTool: this.hooks.canUseTool,
+        env: claudeEnv(),
         pathToClaudeCodeExecutable: this.opts.claudePath,
         toolConfig: { askUserQuestion: { previewFormat: "markdown" } },
         stderr: (data) => this.log.debug(`[claude] ${data.trimEnd()}`),

@@ -258,6 +258,7 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 | I deleted a chat by mistake | Its session is kept on disk; reopen it with `/resume` |
 | Live preview doesn't update | Set `STREAM_MODE=edit` (the bot also falls back automatically if drafts fail) |
 | Bot doesn't respond at all | Check your ID is in `ALLOWED_USER_IDS`, you're in a private chat, and `journalctl -u tg-cc-bot` shows `polling` |
+| `409: Conflict` in the logs, or replies come from somewhere else | Another program polls the same bot token: a manually started `bun src/index.ts`, OpenClaw, a `claude --channels` session, or a copy on another machine. Telegram allows one poller per token. `sudo bash deploy/deploy.sh check` lists the ones on this server. Stop it, or create a separate bot for tg-cc-bot. The bot keeps retrying meanwhile instead of crashing |
 
 ## Development
 
