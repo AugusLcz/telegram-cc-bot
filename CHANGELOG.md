@@ -13,6 +13,17 @@ All notable changes to this project are documented here. The format follows
   description and a button that copies `/name ` for adding arguments. `/skills <words>` filters, and a
   single match opens its details.
 
+### Documentation
+
+- `AGENTS.md` (with `CLAUDE.md` importing it) for coding agents and humans: commands, repository map,
+  rules that must hold, recipes, definition of done, release steps, pitfalls.
+- `docs/decisions/`: eleven records of why the design is what it is.
+- `docs/TESTING.md` (test layers, the bot harness, fakes, live probes) and `docs/ROADMAP.md` (open
+  items, limitations, risks). `docs/ARCHITECTURE.md` brought up to date.
+- `npm run check` (typecheck, tests, shell syntax), `npm run test:deploy` (the `deploy.sh` tests, now in
+  `deploy/test/`), `npm run probe` (what the real Claude Code offers, without sending a message).
+- LF line endings for every file (`.gitattributes`, `.editorconfig`).
+
 ## [0.3.0] - 2026-10-02
 
 ### Added

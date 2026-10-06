@@ -6,7 +6,8 @@ the bot's main screen opens a new chat. **Each chat is one Claude Code session**
 **project**. Bot commands are mechanical (no Claude involved) and work in every chat.
 
 This document describes the design. It is the reference for anyone changing the code: when the code and
-this document disagree, fix one of them.
+this document disagree, fix one of them. Companions: [AGENTS.md](../AGENTS.md) (how to work in the repo),
+[decisions/](decisions/README.md) (why), [TESTING.md](TESTING.md), [ROADMAP.md](ROADMAP.md) (what is open).
 
 ---
 
@@ -81,35 +82,18 @@ The chat ↔ session mapping (`ThreadService`):
 
 ### 3.2 Bot commands (mechanical, in every chat)
 
-Session commands act on the chat they are sent in:
+The full list with usage is in the [README](../README.md#commands). What matters for the design:
 
-| Command | Effect |
-|---|---|
-| `/stop` | Interrupt the running turn, cancel pending prompts and a message still waiting for a slot |
-| `/model [name]`, `/mode [mode]`, `/effort [level]` | Show (buttons) or change this chat's setting. Persisted, applied live, and usable before the first message |
-| `/verbose` | Toggle tool output and timings for this chat |
-| `/rename <title>` | Rename the session and the chat |
-| `/fork` | Open a new chat with a fork of this session |
-| `/close` | Hibernate now: stop the process, keep the chat |
-| `/delete` | After confirmation: hibernate and delete the chat with its messages. The transcript stays resumable |
-
-Bot-wide commands:
-
-| Command | Effect |
-|---|---|
-| `/start`, `/help` | How the bot works and the command list. Warns if Threaded Mode is off |
-| `/status` | This chat's session (ID, project, settings, process state, context usage) plus the bot: live processes, waiting turns, memory, Claude Code version |
-| `/sessions` | Chats with a session and their state (🟢 busy, 🟡 idle, ⚪ hibernated); buttons post a "👋" into a chat to jump there |
-| `/resume [all\|id]` | Pick a past session (active project, all projects, or by ID) and continue it in this chat |
-| `/projects` | List projects with the active one marked; buttons switch it |
-| `/project add <name> <path>` | Register a project (must exist, be a directory, be inside `ALLOWED_ROOTS` if set, be writable) and make it active |
-| `/project use <name>` | Make it active for new chats, and for this chat if its session has not started |
-| `/project rm <name>` | Remove a project. Chats that use it keep working in their directory |
-| `/settings` | Defaults for new chats: model, permission mode, effort, verbose |
-
-Any other `/command` goes to Claude Code unchanged: `/compact`, `/context`, `/usage`, `/clear`,
-skills, plugin commands. The Telegram menu spells `code-review` as `code_review`; the bot maps menu
-spellings back.
+- **Every bot command works in every chat** and never involves Claude. Commands in the `chat` group act
+  on the chat they are sent in (`/stop`, `/model`, `/mode`, `/effort`, `/plan`, `/rename`, `/fork`,
+  `/close`, `/delete`, `/mcp`, `/tasks`, `/export`) or on its directory (`/skills`, `/agents`, `/diff`,
+  `/memory`, `/permissions`, `/hooks`); `bot` commands are bot-wide (`/help`, `/status`, `/sessions`,
+  `/resume`, `/projects`, `/project`, `/settings`, `/plugin`).
+- **Per-chat settings** (`/model`, `/mode`, `/effort`, `/verbose`) are persisted on the chat's record,
+  applied live, and usable before the first message (they create the record).
+- **Aliases** (`/branch` → `/fork`, `/bashes` → `/tasks`, `/start` → `/help`) run but are not listed.
+- **Everything else** that starts with `/` goes to Claude Code unchanged, after mapping a Telegram
+  spelling (`/code_review`) back to Claude Code's (`code-review`). See §11.
 
 ### 3.3 Opening chats
 
@@ -228,9 +212,11 @@ flowchart TB
     store --> core
 ```
 
-Dependency rules:
+Dependency rules (they hold today; keep them):
 
-- `claude/` never imports grammY; `telegram/` never starts Claude processes.
+- Imports point down only: `core` ← `store` / `claude` / `telegram` ← `domain` ← `app` ← `index.ts`.
+- `claude/` never imports grammY; `telegram/` never starts Claude processes. Outside `claude/`, the
+  Agent SDK is imported with `import type` only.
 - `domain/` reaches Telegram only through small ports (for example `TopicGateway`), so its tests need
   neither the network nor the SDK.
 - `index.ts` is the only place that builds concrete objects (composition root).
@@ -239,24 +225,29 @@ Dependency rules:
 
 ```
 src/
-  index.ts                composition root, startup, shutdown
+  index.ts                composition root: config, getMe, instance lock, state, app, menu, probe, polling, shutdown
   core/
     config.ts             environment configuration and validation
     logger.ts             levelled, scoped logger (one line per event, journald friendly)
     mutex.ts              KeyedMutex: serialises work per key
     queue.ts              AsyncQueue: push-based async iterable (streaming input)
-    types.ts              Target, ThreadKey, records, Effort
+    exec.ts               Exec / runProgram: helper programs without a shell, stdin, or unbounded output
+    instance-lock.ts      one copy of the bot per bot ID on a machine (lock file in /tmp)
+    types.ts              Target, ThreadKey, records, state shape, Effort
   store/
-    store.ts              Store interface, JsonFileStore (versioned, atomic, debounced)
+    store.ts              Store interface, JsonFileStore (versioned, atomic, debounced), MemoryStore
   claude/
-    process.ts            ProcessHandle + ProcessFactory interfaces; SdkProcess / SdkProcessFactory (one query() each)
+    process.ts            ProcessHandle + ProcessFactory; SdkProcess (one query() each); claudeEnv; session flag settings; task tracking
     pool.ts               SessionPool: states, admission, eviction, timers, stats
-    sessions.ts           SessionApi: list / info / fork / rename / recap over the SDK session store
-    catalog.ts            CommandCatalog: Claude commands and models (startup probe, live updates)
-    cmdnames.ts           Claude ↔ Telegram command-name mapping, command parsing
+    sessions.ts           SessionApi: list / info / fork / rename / recap / transcript over the SDK session store
+    catalog.ts            CommandCatalog (commands, models, learned names); withProbe (throwaway process)
+    cmdnames.ts           Telegram ↔ Claude Code command names, parsing, commandKind and the menu allowlist
+    config-files.ts       read-only views of settings and instruction files (/permissions, /hooks, /memory)
+    cli.ts                where the claude CLI is (CLAUDE_PATH, PATH, the SDK's binary)
   telegram/
+    polling.ts            Poller: the only getUpdates loop; 409 / 401 / webhook handling
     target.ts             Target helpers: thread parameters, classification of updates
-    send.ts               send/edit/markdown/draft/typing; error classification
+    send.ts               send/edit/markdown/file/draft/typing; error classification (TopicGoneError)
     format.ts             Markdown → Telegram HTML, fence-safe splitting
     topics.ts             create/rename/delete topics, titles
     render.ts             TurnRenderer: one per chat, turns SDK messages into Telegram messages
@@ -265,20 +256,27 @@ src/
     media.ts              photo/document download
     tools.ts              tool icons and one-line summaries
   domain/
-    chats.ts              ChatService: per-chat active project and defaults
+    chats.ts              ChatService: per-user active project and defaults; claimStateForBot
     projects.ts           ProjectService: validation, active project
-    threads.ts            ThreadService: chats ↔ sessions ↔ processes (+ TopicGateway port)
+    threads.ts            ThreadService: chats ↔ sessions ↔ processes (+ TopicGateway port); resumeHere
     access.ts             AccessControl
     errors.ts             UserError: expected failures shown to the user as is
   app/
-    registry.ts           CommandRegistry (every command in every chat) and CallbackRouter
+    registry.ts           CommandRegistry (groups, aliases) and CallbackRouter
     context.ts            App (services handed to handlers), RendererRegistry
     views.ts              shared HTML pieces: chat headers, keyboards, replies
-    control.ts            bot-wide commands and buttons (/help, /status, /projects, /resume …)
+    control.ts            bot-wide commands and buttons (/help, /status, /sessions, /resume, /projects, /settings)
     thread.ts             chat ↔ session: lazy binding, message handling, session commands, passthrough
+    inspect.ts            Telegram versions of Claude Code screens: /agents /mcp /tasks /diff /export /plan /memory /permissions /hooks /plugin
+    skills.ts             /skills browser (tabs, pages, detail view, filter)
     bot.ts                createApp(): wiring, access gate, error boundary, routing; syncMenu()
 scripts/
-  topics-spike.ts         checks private-chat topics against the real Bot API
+  probe-claude.ts         live: what the real Claude Code offers in a directory (no message sent)
+  topics-spike.ts         live: private-chat topics against the real Bot API
+  check-shell.ts          bash -n / shellcheck for the shell scripts (part of npm run check)
+deploy/
+  deploy.sh               install / update / check / … on Linux with systemd (see decision 0011)
+  test/                   bash tests for deploy.sh's functions (Linux)
 ```
 
 ### 5.3 Key interfaces
@@ -290,7 +288,8 @@ interface ProcessSpec { sessionId: string; resume: boolean; cwd: string;
 interface ProcessHandle {
   readonly sessionId: string;          // follows conversation resets
   readonly turnActive: boolean;
-  readonly backgroundTasks: number;
+  readonly tasks: readonly TaskInfo[]; // live non-ambient background tasks; backgroundTasks = their count
+  readonly commands: SlashCommand[];   // from initialisation, refreshed by supportedCommands()
   start(): Promise<void>;              // spawn + initialise (timeout)
   send(content: UserContent): void;
   interrupt(): Promise<void>;
@@ -298,6 +297,8 @@ interface ProcessHandle {
   setPermissionMode(m: PermissionMode): Promise<void>;
   setEffort(e?: Effort): Promise<void>;
   contextUsage(): Promise<ContextUsage | null>;
+  supportedCommands(), supportedAgents(), mcpServerStatus(): Promise<…>;
+  toggleMcpServer(name, enabled), reconnectMcpServer(name), reloadPlugins(), stopTask(id): Promise<void>;
   close(): Promise<void>;
 }
 interface ProcessFactory { create(spec: ProcessSpec, hooks: ProcessHooks): ProcessHandle }
@@ -380,7 +381,6 @@ after `PERMISSION_TIMEOUT_MS`.
 **Chat deleted by the user.** Telegram sends no update for this. The next send to the chat fails with
 "message thread not found". The chat is unbound and its process hibernated; this is logged (there is
 no chat left to report it in). The session stays resumable.
-The session stays resumable.
 
 **Unknown user.** The access middleware stops the update and (rate-limited) replies with the user ID.
 
@@ -388,6 +388,8 @@ The session stays resumable.
 
 ## 8. Concurrency model
 
+- Polling: exactly one `getUpdates` loop per process (`Poller`), and one process per bot per machine
+  (instance lock). Claude sessions never talk to Telegram ([0005](decisions/0005-one-poller-per-token.md)).
 - Updates: `@grammyjs/runner` with `sequentialize` keyed by `chatId:threadId` (`main` outside chats).
   Order is kept within a chat; different chats run concurrently.
 - Chat state changes (start, send, settings, fork, delete): `KeyedMutex` per chat key in
@@ -408,8 +410,12 @@ The session stays resumable.
   `/fork` (which the bot opens itself) create sessions. `/help` and `deploy.sh check` warn about it.
 - A message without a thread (or in the General thread `1`) is outside any chat and never starts a
   session. Messages to it are sent without `message_thread_id`.
-- Bot command menus are scoped per private chat, not per topic, so every chat shows the same menu: bot
-  commands plus Claude Code's. That is also why every bot command works in every chat.
+- Bot command menus are scoped per private chat, not per topic, so every chat shows the same menu. That
+  is also why every bot command works in every chat. The menu lists commands only (§11) and is set for
+  the default scope, all private chats and each allowed user's chat (the highest-priority scope).
+- Limits the code relies on: 4096 characters per message (the bot splits at 3500–3800), 64 bytes of
+  callback data (buttons carry indexes into in-memory snapshots), command names `[a-z0-9_]{1,32}`,
+  100 menu commands.
 - Markdown is converted to Telegram HTML. If Telegram rejects the markup, the message is resent as plain
   text. Long replies are split fence-safely, and very long ones are sent as a `.md` file.
 - Live previews use `sendMessageDraft` and fall back to editing a placeholder message.
@@ -429,60 +435,7 @@ See `.env.example`. Notable keys:
 
 ---
 
-## 11. Extension points
-
-| Want to… | Extend |
-|---|---|
-| Hide cold-start latency | A `ProcessFactory` backed by the SDK's `prewarm()` spare process |
-| Store state in SQLite | Another `Store` implementation |
-| Add a command | `registry.register({ name, scope, description, handler })` in `app/main.ts` or `app/thread.ts`. Help and menu update automatically |
-| Add buttons | `callbacks.on(prefix, handler)`; callback data is `prefix:payload` (≤ 64 bytes) |
-| Change how output looks | `TurnRenderer` only; nothing else formats SDK messages |
-| Per-project defaults | Extend `ProjectRecord` and `ThreadService.specFor()` |
-| Another chat platform | Re-implement `telegram/` + `app/`; `claude/`, `domain/`, `store/` stay |
-
----
-
-## 12. Testing strategy
-
-- **Unit:** format, command names, queue, mutex, config, store (atomic write, corrupt file), target
-  classification, registry routing.
-- **Pool:** a fake `ProcessFactory` drives every lifecycle rule: LRU eviction, idle TTL, BUSY protection
-  (turns, prompts, background tasks), admission queue and `/stop` cancellation, crash → COLD → resume
-  with persisted settings, shutdown.
-- **Domain:** ThreadService invariants with an in-memory store, the fake factory and a fake
-  `TopicGateway`.
-- **Controllers:** `bot.handleUpdate()` with an API transformer that records outgoing calls: chat
-  routing, unknown users, new chats bind to the active project on first use, command-only chats leave no
-  record, `/project use` before and after a session starts, chat-gone handling.
-- **Live:** a smoke script against real Claude Code (two sessions, `MAX_LIVE_SESSIONS=1`, transparent
-  resume) and `scripts/topics-spike.ts` against the real Bot API.
-
----
-
-## 13. Decisions and risks
-
-| Decision | Reason |
-|---|---|
-| Chat ⇔ session, project fixed once the session starts | Matches Claude Code's model (a session belongs to a directory); keeps `cwd` stable for the transcript |
-| Hibernate + transparent resume, bounded pool | Bounded RAM and usage; picking up and putting down sessions works like `claude --resume` |
-| Pre-generated session UUID (`Options.sessionId`) | The chat is bound before Claude answers; nothing depends on parsing `init` |
-| Allowlist only in `.env` | Simple trust model; changes go through the deploy script |
-| Bot commands mechanical and available in every chat | Telegram's Threaded Mode has no main view to type into: every message opens or belongs to a chat |
-| Chat bound on first use, project switchable until then | Command-only chats leave nothing behind; `/project use` before talking puts the session where it belongs |
-| No `/new` | Typing on the bot's main screen already opens a new chat |
-| Fire-and-forget turns plus a per-chat mutex | Ordered messages and responsive `/stop` at the same time |
-
-Risks:
-
-- **Private-chat topics are new** (Bot API 9.3, December 2025). A May 2026 report
-  (tdlib/telegram-bot-api#847, closed) described `message thread not found` errors.
-  `scripts/topics-spike.ts` verifies the real behaviour before deployment.
-- **Agent SDK billing** for subscription users may change (a separate SDK credit was announced, then
-  paused).
-- Scheduled wake-ups inside a session (`/loop`, cron tools) do not survive hibernation.
-
-## Claude Code commands over Telegram
+## 11. Claude Code commands over Telegram
 
 Claude Code's built-in commands come in three kinds:
 - `prompt` commands, which send a prompt;
@@ -504,7 +457,7 @@ and MCP ones) into four groups, in `commandKind` (`src/claude/cmdnames.ts`):
 Everything can still be typed. A name Telegram can't spell resolves through the catalog, which
 also learns the names each session reports.
 
-Terminal screens worth having become bot commands (`src/app/inspect.ts`):
+Terminal screens worth having become bot commands (`src/app/inspect.ts`, `src/app/skills.ts`):
 - **`/skills`, `/agents`:** ask the chat's live process. Without one, they ask a throwaway process in
   the chat's directory (`withProbe`, `src/claude/catalog.ts`): no message, no transcript, no pool
   slot.
@@ -521,3 +474,37 @@ Terminal screens worth having become bot commands (`src/app/inspect.ts`):
 
 Helper programs run through `Exec` (`src/core/exec.ts`): no shell, no stdin, a time limit and bounded
 output. Tests inject their own.
+
+The `/skills` browser is one message edited in place: tabs, 8 skills per page, a detail view with a
+`copy_text` button. Its buttons carry indexes into a per-message snapshot kept in memory (the 50 most
+recent) ([0010](decisions/0010-commands-in-the-menu-skills-in-a-browser.md)).
+
+---
+
+## 12. Extension points
+
+| Want to… | Extend |
+|---|---|
+| Add a bot command | `app.commands.register({ name, group, description, usage?, aliases?, run })` in the `register*` function of the module it belongs to (`control.ts`, `thread.ts`, `inspect.ts`); wrap with `chatCommand` when it needs a chat. `/help` and the menu update automatically |
+| Add buttons | `app.callbacks.on(prefix, handler)`; data is `prefix:payload` (≤ 64 bytes): carry indexes into a snapshot, not names |
+| Expose an SDK capability | `ProcessHandle` + `SdkProcess` (`claude/process.ts`) + `FakeProcess` (tests) together |
+| Change how output looks | `TurnRenderer` only; nothing else formats SDK messages |
+| Override something in every session | `SdkProcess.start` options (`SESSION_FLAG_SETTINGS`, `claudeEnv`), with a test |
+| Hide cold-start latency | A `ProcessFactory` backed by the SDK's `prewarm()` spare process |
+| Store state in SQLite | Another `Store` implementation |
+| Per-project defaults | Extend `ProjectRecord` and `ThreadService.specFor()` |
+| Another chat platform | Re-implement `telegram/` + `app/`; `claude/`, `domain/`, `store/` stay |
+
+---
+
+## 13. Testing
+
+Layers, the bot harness, fakes, `deploy.sh` tests and live probes: [TESTING.md](TESTING.md). The
+gate is `npm run check`.
+
+---
+
+## 14. Decisions
+
+Each decision has a record in [decisions/](decisions/README.md): the context that forced it, what was
+decided, and the consequences to watch. Risks and open items are in [ROADMAP.md](ROADMAP.md).

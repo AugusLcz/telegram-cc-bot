@@ -229,14 +229,24 @@ sudo bash deploy/deploy.sh
 
 ## 开发
 
+先读 [AGENTS.md](AGENTS.md)：常用命令、仓库结构、必须遵守的规则、常见改动的做法、完成标准和发版步骤。它是写给编程 agent（也适用于人）的，新会话不需要任何之前的上下文就能接手。
+
 ```bash
-npm install          # 或 bun install
-npm run typecheck
-npm test             # 单元、进程池、领域层和控制器测试（node:test）
-npm run start:node   # 用 Node 24 运行（读取 .env）
+npm ci                     # 或 bun install
+npm run check              # 类型检查 + 全部测试 + shell 语法检查：每次提交前都要跑
+sudo npm run test:deploy   # deploy.sh 的测试（需要 Linux；Windows 上用 WSL）
+npm run probe              # 看真实的 Claude Code 在当前目录提供哪些命令（不发消息）
+npm run start:node         # 用 Node 24 运行（读取 .env）
 ```
 
-代码分层为 `core` → `store` / `claude` / `telegram` → `domain` → `app`。模块划分、生命周期状态机、数据模型和扩展点见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。测试用假的 Claude 进程工厂和会记录调用的 Telegram API，整个 bot 不联网也能跑。
+| 文档 | 内容 |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 概念、生命周期、分层、模块、数据模型、扩展点 |
+| [docs/decisions/](docs/decisions/README.md) | 设计决策及其原因 |
+| [docs/TESTING.md](docs/TESTING.md) | 测试分层、bot 测试脚手架和假实现、真实环境探测 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 待办事项和已知限制 |
+
+测试用假的 Claude 进程工厂和会记录调用的 Telegram API，整个 bot 不联网也能跑。源码用 `.ts` 扩展名导入、只用可擦除的 TypeScript 语法，所以同一份代码不需要构建就能在 Bun 和 Node.js 下直接运行。
 
 ## 限制
 

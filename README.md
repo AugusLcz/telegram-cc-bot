@@ -275,16 +275,24 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 
 ## Development
 
+Start with [AGENTS.md](AGENTS.md): commands, repository map, the rules that must hold, recipes, definition of done and release steps. It is written so that a coding agent (or a person) in a fresh session can pick up the work.
+
 ```bash
-npm install            # or: bun install
-npm run typecheck
-npm test               # unit, pool, domain and controller tests (node:test)
-npm run start:node     # run under Node.js 24 with .env
+npm ci                     # or: bun install
+npm run check              # typecheck + all tests + shell syntax: run before every commit
+sudo npm run test:deploy   # deploy.sh tests (Linux; WSL on Windows)
+npm run probe              # what the real Claude Code offers here (no message sent)
+npm run start:node         # run under Node.js 24 with .env
 ```
 
-The code is layered (`core` → `store` / `claude` / `telegram` → `domain` → `app`); see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map, lifecycle state machine, data model and extension points. Tests use a fake Claude process factory and a recording Telegram API, so the whole bot runs without network access.
+| Doc | For |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Concepts, lifecycle, layers, module map, data model, extension points |
+| [docs/decisions/](docs/decisions/README.md) | Why the design is what it is |
+| [docs/TESTING.md](docs/TESTING.md) | Test layers, the bot harness and fakes, live probes |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Open items and known limitations |
 
-Source files use explicit `.ts` import extensions and only erasable TypeScript syntax, so the same code runs directly under Bun and under Node.js type stripping without a build step.
+Tests use a fake Claude process factory and a recording Telegram API, so the whole bot runs without network access. Source files use `.ts` import extensions and only erasable TypeScript, so the same code runs under Bun and Node.js type stripping without a build step.
 
 ## Limitations
 

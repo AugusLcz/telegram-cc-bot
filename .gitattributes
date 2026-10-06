@@ -1,1 +1,3 @@
+# LF everywhere: the bot and deploy.sh run on Linux, contributors edit on any OS.
+* text=auto eol=lf
 *.sh text eol=lf
