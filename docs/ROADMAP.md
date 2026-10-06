@@ -8,6 +8,9 @@ item when it ships, add one when you find a gap.
 
 - The `/skills` browser and the 0.3.0 commands on a real phone after `deploy.sh update`: tabs, paging,
   copy button, `/mcp` buttons, `/tasks` stop, `/diff` patch file, `/plugin install`.
+- Answers-only chats on a phone: the working message (elapsed time, Stop, hidden during a prompt, gone
+  before the answer, which notifies), and with `/thinking` whether thinking summaries actually arrive for
+  the account's model ([0012](decisions/0012-chats-show-answers-not-work.md)).
 
 ## Open
 
@@ -21,6 +24,9 @@ item when it ships, add one when you find a gap.
 - **Browser state survives restarts.** `/skills`, `/mcp`, `/tasks` button snapshots are in memory;
   after a restart old buttons answer "outdated".
 - **Voice and video.** Only text, photos and documents reach Claude.
+- **Streaming answers without `/thinking`.** The answer arrives whole because text can't be told from a
+  note until the turn ends. A heuristic (preview text once it is long, drop it if a tool call follows)
+  could bring the preview back.
 
 ## Known limitations
 
@@ -29,6 +35,8 @@ item when it ships, add one when you find a gap.
 - MCP servers that need sign-in must be authorized on the server (`claude` → `/mcp`) or in claude.ai.
 - `/hooks` lists hooks from settings files, not those plugins add; `/memory` lists the instruction
   files loaded at start, not nested ones Claude Code loads on demand.
+- Without `/thinking` an answer is sent only when the turn ends; a crash mid-turn loses text held
+  until then.
 - New Claude Code built-ins are shown as skills until classified; check with `npm run probe`
   ([0010](decisions/0010-commands-in-the-menu-skills-in-a-browser.md)).
 

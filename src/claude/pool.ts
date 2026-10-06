@@ -158,6 +158,10 @@ export class SessionPool {
     await this.get(key)?.setEffort(effort);
   }
 
+  async setShowThinking(key: string, on: boolean): Promise<void> {
+    await this.get(key)?.setShowThinking(on);
+  }
+
   async contextUsage(key: string): Promise<ContextUsage | null> {
     return (await this.get(key)?.contextUsage()) ?? null;
   }

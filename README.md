@@ -49,13 +49,14 @@ To work in another directory, switch the project first (`/project use api`, in a
 ## Features
 
 - **Parallel sessions.** Several chats can work at the same time, each in its own project directory, with its own model, permission mode and effort.
-- **Streaming replies.** Live preview via Telegram's `sendMessageDraft`, falling back to editing a placeholder message if drafts aren't available. Final replies are Markdown converted to Telegram HTML: code blocks, tables, lists, quotes and links. Long replies are split safely (code fences stay balanced); very long ones arrive as a `.md` file.
-- **Compact tool activity.** Tool calls collapse into a status message such as `💻 Bash ls -la` or `✏️ Edit src/app.ts`, with subagent calls indented. `/verbose` also shows tool output and timings.
+- **Answers, not noise.** A chat shows Claude's answers. Its notes between steps, its thinking and its tool calls stay out, so a long task ends in one reply that notifies you. Replies are Markdown converted to Telegram HTML: code blocks, tables, lists, quotes and links. Long replies are split safely (code fences stay balanced); very long ones arrive as a `.md` file.
+- **A working message while Claude works.** `⏳ Working… 1m 20s` (sent silently, with a ⏹ Stop button) stays at the bottom of the chat until the answer replaces it, and steps aside while a prompt waits for you. The typing indicator runs too.
+- **Thinking on demand.** `/thinking` shows Claude's notes between steps, its thinking summaries and timings in that chat, with a live preview of the text as it is written (`STREAM_MODE`). Tool calls are never shown.
 - **Interactive prompts as buttons.** Permission requests (Allow / Always allow / Deny), `AskUserQuestion` (single- and multi-select), and plan approval, in the chat that asked. While a prompt is open, replying with text denies the request and tells Claude what to do instead, or answers the question in your own words.
 - **Claude Code's full command set.** Built-ins, bundled skills, your personal and project skills, plugin commands and `.claude/commands` work in every chat and appear in the Telegram command menu.
 - **Chat titles.** A chat without a name of yours is titled after its first prompt; names you give are never overwritten. `/rename` renames both the chat and the session.
 - **Photos and files.** Photos are sent to Claude as images. Documents are saved under `<project>/.tg-uploads/` and the path is passed to Claude.
-- **Status.** Notices for context compaction, API retries, usage-limit warnings and permission denials. `/status` shows this chat's session (with context usage) and the bot's process pool.
+- **Status.** Notices for context compaction, API retries and usage-limit warnings (permission denials too, with `/thinking`). `/status` shows this chat's session (with context usage) and the bot's process pool.
 
 ## Commands
 
@@ -67,7 +68,7 @@ All bot commands work in every chat and don't involve Claude.
 |---|---|
 | `/stop` | Interrupt the running turn, cancel open prompts and a message still waiting for a slot |
 | `/model [name]` · `/mode [mode]` · `/effort [level]` | Show (buttons) or change this chat's model, permission mode or effort; also before the first message |
-| `/verbose` | Toggle tool output and timings for this chat |
+| `/thinking` | Show Claude's notes, thinking summaries and timings in this chat, or only its answers (the default). `/verbose` still works |
 | `/rename <title>` | Rename this chat and its session |
 | `/fork` (`/branch`) | Copy this session into a new chat |
 | `/close` | Stop this chat's process now; your next message resumes it |
@@ -93,7 +94,7 @@ All bot commands work in every chat and don't involve Claude.
 | `/projects` | List projects, buttons to switch the active one |
 | `/project add <name> <path>` | Register a project directory (must exist and be inside `ALLOWED_ROOTS` if set) and make it active |
 | `/project use <name>` · `/project rm <name>` | Switch the active project (also moves this chat if it hasn't talked to Claude yet) · remove one |
-| `/settings` | Defaults for new chats: model, permission mode, effort, verbose |
+| `/settings` | Defaults for new chats: model, permission mode, effort, thinking |
 | `/plugin [list\|install\|uninstall\|enable\|disable\|update\|marketplace …]` | Manage Claude Code plugins with the `claude plugin` CLI; the chat's session reloads them |
 
 There is no `/new`: go back to the bot's main screen and type to start a new chat.
@@ -236,7 +237,7 @@ Set these in `.env`. Bun loads it automatically; systemd loads it through `Envir
 | `BACKGROUND_MAX_MINUTES` | `120` | Close a process kept alive only by background tasks after this long |
 | `CLAUDE_PATH` | bundled with the SDK | Path to a system-installed `claude` binary |
 | `STATE_FILE` | `./data/state.json` | Projects, chat ↔ session mapping and settings |
-| `STREAM_MODE` | `draft` | Live preview: `draft`, `edit`, or `off` |
+| `STREAM_MODE` | `draft` | Live preview in chats with `/thinking` on: `draft`, `edit`, or `off` |
 | `PERMISSION_TIMEOUT_MS` | `600000` | Auto-deny prompts after this long |
 | `LOG_LEVEL` | `info` | `debug` also logs Claude Code's stderr |
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | Optional long-lived token from `claude setup-token` |
@@ -267,7 +268,7 @@ Usage counts against your plan's normal limits; parallel chats use it faster. An
 | "⏳ waiting for a free slot" | All `MAX_LIVE_SESSIONS` processes are busy. Wait, `/stop` another chat, or raise the limit |
 | "Auto mode isn't available…" | Expected on some accounts or models. The chat switched to `acceptEdits`; use `/mode` to choose another |
 | I deleted a chat by mistake | Its session is kept on disk; reopen it with `/resume` |
-| Live preview doesn't update | Set `STREAM_MODE=edit` (the bot also falls back automatically if drafts fail) |
+| Live preview doesn't update | It shows only with `/thinking` on (otherwise the answer arrives whole). Set `STREAM_MODE=edit` (the bot also falls back automatically if drafts fail) |
 | Bot doesn't respond at all | Check your ID is in `ALLOWED_USER_IDS`, you're in a private chat, and `journalctl -u tg-cc-bot` shows `polling` |
 | `409: Conflict` in the logs | Telegram serves one poller per bot token, and another client asked for this bot's updates at the same time. The bot itself polls from one loop only, however many chats and Claude sessions run. Common causes: Claude Code's Telegram plugin configured with this bot's token (a `claude` you run yourself loads it; the bot's own sessions don't), a second copy of the bot, or a copy on another machine. `sudo bash deploy/deploy.sh check` lists local processes and config files using the token, with how each was started. The bot keeps retrying meanwhile instead of crashing |
 | No commands after typing `/` | The bot sets the menu at start and again once Claude Code's commands are known (`menu: N commands` in the log; `deploy.sh check` shows the count). Reopen the chat if Telegram still shows an old menu |

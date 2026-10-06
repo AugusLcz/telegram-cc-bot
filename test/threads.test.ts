@@ -65,7 +65,7 @@ function setup() {
   fs.mkdirSync(web);
   fs.mkdirSync(api);
   const store = new MemoryStore();
-  const chats = new ChatService(store, () => ({ permissionMode: "auto", verbose: false }));
+  const chats = new ChatService(store, () => ({ permissionMode: "auto", thinking: false }));
   const projects = new ProjectService(store, chats, { allowedRoots: [root], isWritable: () => true });
   projects.bootstrap(web);
   const factory = new FakeFactory();
@@ -282,7 +282,7 @@ test("a bot switch puts chat bindings aside and a switch back restores them; an 
     d.projects.home = { name: "home", path: "/w", addedAt: 0 };
     d.chats["42"] = {
       activeProject: "home",
-      defaults: { permissionMode: "auto", verbose: false },
+      defaults: { permissionMode: "auto", thinking: false },
       threads: { "5": { threadId: 5, sessionId: "s-a" } as never, "6": { threadId: 6, sessionId: "s-a2" } as never },
     };
   });

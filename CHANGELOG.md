@@ -6,8 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-06
+
+### Added
+
+- A working message while Claude works: `⏳ Working… 1m 20s`, sent silently with a ⏹ Stop button. It stays
+  at the bottom of the chat, steps aside while a prompt waits for you, and is deleted before the answer,
+  which arrives as a new message with a notification.
+- `/thinking` (per chat; default in `/settings`) shows Claude's notes between steps, its thinking
+  summaries (requested from the API when on), permission denials and timings, with a live preview.
+
 ### Changed
 
+- Chats show Claude's answers only. Notes between steps and tool calls (`💻 Bash …` status messages,
+  subagent lines) are no longer sent; tool output isn't shown either. Without `/thinking` the answer
+  arrives whole, without a live preview.
+- `/thinking` replaces `/verbose` (still accepted). Chats and defaults that had verbose on have thinking on.
 - `/skills` is a browser in one message instead of a long list. Tabs separate yours from Claude Code's,
   with 8 skills per page in two columns and ◀ ▶ to page through. Tapping a skill shows its full
   description and a button that copies `/name ` for adding arguments. `/skills <words>` filters, and a
@@ -17,7 +31,7 @@ All notable changes to this project are documented here. The format follows
 
 - `AGENTS.md` (with `CLAUDE.md` importing it) for coding agents and humans: commands, repository map,
   rules that must hold, recipes, definition of done, release steps, pitfalls.
-- `docs/decisions/`: eleven records of why the design is what it is.
+- `docs/decisions/`: twelve records of why the design is what it is.
 - `docs/TESTING.md` (test layers, the bot harness, fakes, live probes) and `docs/ROADMAP.md` (open
   items, limitations, risks). `docs/ARCHITECTURE.md` brought up to date.
 - `npm run check` (typecheck, tests, shell syntax), `npm run test:deploy` (the `deploy.sh` tests, now in
@@ -177,7 +191,8 @@ First release.
   real Bot API spike script (`scripts/topics-spike.ts`).
 - Architecture document, English and Chinese READMEs, 66 tests.
 
-[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.0...v0.2.1

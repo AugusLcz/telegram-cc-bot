@@ -45,9 +45,14 @@ export async function sendHtml(
   api: Api,
   target: Target,
   html: string,
-  opts: { plain?: string; keyboard?: InlineKeyboardMarkup } = {},
+  opts: { plain?: string; keyboard?: InlineKeyboardMarkup; silent?: boolean } = {},
 ): Promise<number> {
-  const base = { ...threadParams(target), ...NO_PREVIEW, reply_markup: opts.keyboard };
+  const base = {
+    ...threadParams(target),
+    ...NO_PREVIEW,
+    reply_markup: opts.keyboard,
+    ...(opts.silent ? { disable_notification: true } : {}),
+  };
   return call(target, async () => {
     try {
       return (await api.sendMessage(target.chatId, html, { ...base, parse_mode: "HTML" })).message_id;

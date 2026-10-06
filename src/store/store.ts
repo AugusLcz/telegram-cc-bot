@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { silentLogger, type Logger } from "../core/logger.ts";
-import { emptyState, type StateData } from "../core/types.ts";
+import { emptyState, type SessionSettings, type StateData } from "../core/types.ts";
 
 /**
  * Persistent bot state. Reads are synchronous against an in-memory copy;
@@ -59,7 +59,7 @@ export class JsonFileStore implements Store {
     try {
       const parsed = JSON.parse(raw) as Partial<StateData>;
       if (parsed.version !== 1) throw new Error(`unsupported state version ${String(parsed.version)}`);
-      return { ...emptyState(), ...parsed, version: 1 };
+      return upgrade({ ...emptyState(), ...parsed, version: 1 });
     } catch (err) {
       const aside = `${this.file}.corrupt-${Date.now()}`;
       fs.renameSync(this.file, aside);
@@ -104,4 +104,24 @@ export class JsonFileStore implements Store {
     this.writing = run;
     return run;
   }
+}
+
+/**
+ * Bring settings written by earlier versions up to date, in place. `verbose`
+ * (tool output) became `thinking`; a chat that had it on keeps
+ * seeing more. Older versions read the result fine (a missing `verbose` is off).
+ */
+export function upgrade(data: StateData): StateData {
+  const fix = (s: SessionSettings & { verbose?: boolean }) => {
+    s.thinking ??= s.verbose ?? false;
+    delete s.verbose;
+  };
+  for (const chat of Object.values(data.chats)) {
+    fix(chat.defaults);
+    for (const t of Object.values(chat.threads)) fix(t);
+  }
+  for (const byChat of Object.values(data.botArchive ?? {})) {
+    for (const threads of Object.values(byChat)) for (const t of Object.values(threads)) fix(t);
+  }
+  return data;
 }

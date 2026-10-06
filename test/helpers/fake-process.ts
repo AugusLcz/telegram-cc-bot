@@ -28,6 +28,7 @@ export class FakeProcess implements ProcessHandle {
   model: string | undefined;
   permissionMode: PermissionMode;
   effort: Effort | undefined;
+  showThinking: boolean;
   interrupts = 0;
   readonly spec: ProcessSpec;
   readonly hooks: ProcessHooks;
@@ -41,6 +42,7 @@ export class FakeProcess implements ProcessHandle {
     this.model = spec.model;
     this.permissionMode = spec.permissionMode;
     this.effort = spec.effort;
+    this.showThinking = spec.showThinking ?? false;
   }
 
   async start(): Promise<void> {
@@ -73,6 +75,10 @@ export class FakeProcess implements ProcessHandle {
   }
   async setEffort(effort: Effort | undefined): Promise<void> {
     this.effort = effort;
+  }
+  async setShowThinking(on: boolean): Promise<void> {
+    this.showThinking = on;
+    this.controls.push(`thinking:${on ? "on" : "off"}`);
   }
   async contextUsage(): Promise<ContextUsage | null> {
     return { percentage: 12, totalTokens: 24000, maxTokens: 200000 } as ContextUsage;

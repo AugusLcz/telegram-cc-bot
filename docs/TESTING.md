@@ -32,7 +32,7 @@ must not depend on the machine: create temp dirs with `fs.mkdtempSync`, never re
 in-memory store. The owner is user `42` (`OWNER`); `STRANGER` is `7`.
 
 ```ts
-const h = harness();                       // opts: hasTopics, reject(method, payload), getUpdates, exec
+const h = harness();                       // opts: hasTopics, reject(method, payload), getUpdates, exec, working
 await h.send("hello", { thread: 500 });    // a message in chat (topic) 500
 await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: hello")), 1000, "reply");
 await h.send("/mcp", { thread: 500 });     // commands are messages too
@@ -49,6 +49,7 @@ await h.press("mcp:d:0", 500, messageId);  // an inline button on message `messa
 | `home`, `other` | Temp project directories; `home` is the active project |
 | `reject` | Make chosen API calls fail with a description, e.g. a menu Telegram rejects |
 | `exec` | Replace the program runner used by `/diff` and `/plugin` |
+| `working` | Timing of the `⏳ Working…` message. The default (60 s) keeps it out of tests; `{ delayMs: 5 }` shows it (`test/render.test.ts`) |
 
 By default every message gets a fake reply: the process emits `init`, then `reply: <text>`.
 

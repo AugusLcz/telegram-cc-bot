@@ -179,9 +179,9 @@ test("/settings changes defaults for new chats only", async () => {
   await h.send("hi", { thread: 500 });
   await waitFor(() => h.app.threads.get(`${OWNER}:500`) !== undefined, 1000, "bound");
   await h.send("/settings", { thread: 500 });
-  await h.press("set:verbose", 500);
+  await h.press("set:thinking", 500);
   await h.press("sdp:plan", 500);
-  assert.equal(h.app.chats.get(OWNER)!.defaults.verbose, true);
+  assert.equal(h.app.chats.get(OWNER)!.defaults.thinking, true);
   assert.equal(h.app.chats.get(OWNER)!.defaults.permissionMode, "plan");
   assert.equal(h.app.threads.get(`${OWNER}:500`)!.permissionMode, "auto", "existing chat unchanged");
   await h.send("x", { thread: 501 });

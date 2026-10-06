@@ -69,6 +69,10 @@ Full module list: [ARCHITECTURE §5.2](docs/ARCHITECTURE.md#52-modules).
 - **What every session gets** is decided in one place, `SdkProcess.start`: Claude Code's system prompt
   preset, the flag settings that turn the Telegram channel plugin off, the cleaned environment
   ([0007](docs/decisions/0007-session-settings-the-bot-imposes.md)).
+- **What a chat shows.** Claude's answers, notices and prompts; never tool calls or tool output. Notes
+  between steps, thinking and timings only with the chat's `thinking` on. Anything sent during a turn goes
+  through `TurnRenderer` so the working message stays last
+  ([0012](docs/decisions/0012-chats-show-answers-not-work.md)).
 - **Telegram limits.** 4096 characters per message; callback data ≤ 64 bytes (`callbackData` throws);
   command names `[a-z0-9_]{1,32}`; at most 100 menu commands; all text is sent with `parse_mode: HTML`.
 

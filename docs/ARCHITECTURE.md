@@ -56,7 +56,7 @@ The chat ↔ session mapping (`ThreadService`):
 
 - **Key.** A chat is identified by `chatId:threadId`. Its record holds the current `sessionId`, whether
   the transcript exists (`started`), the working directory and the per-chat settings (model, permission
-  mode, effort, verbose). The process pool and the permission broker use the same key.
+  mode, effort, thinking). The process pool and the permission broker use the same key.
 - **Lazy binding.** A record is created the first time the chat needs a session: its first message to
   Claude, or a per-chat setting such as `/model`. The session UUID is generated then
   (`Options.sessionId`). Chats used only for bot commands get no record.
@@ -89,7 +89,7 @@ The full list with usage is in the [README](../README.md#commands). What matters
   `/close`, `/delete`, `/mcp`, `/tasks`, `/export`) or on its directory (`/skills`, `/agents`, `/diff`,
   `/memory`, `/permissions`, `/hooks`); `bot` commands are bot-wide (`/help`, `/status`, `/sessions`,
   `/resume`, `/projects`, `/project`, `/settings`, `/plugin`).
-- **Per-chat settings** (`/model`, `/mode`, `/effort`, `/verbose`) are persisted on the chat's record,
+- **Per-chat settings** (`/model`, `/mode`, `/effort`, `/thinking`) are persisted on the chat's record,
   applied live, and usable before the first message (they create the record).
 - **Aliases** (`/branch` → `/fork`, `/bashes` → `/tasks`, `/start` → `/help`) run but are not listed.
 - **Everything else** that starts with `/` goes to Claude Code unchanged, after mapping a Telegram
@@ -250,11 +250,12 @@ src/
     send.ts               send/edit/markdown/file/draft/typing; error classification (TopicGoneError)
     format.ts             Markdown → Telegram HTML, fence-safe splitting
     topics.ts             create/rename/delete topics, titles
-    render.ts             TurnRenderer: one per chat, turns SDK messages into Telegram messages
+    render.ts             TurnRenderer: one per chat, turns SDK messages into Telegram messages (answers; notes and thinking with /thinking)
+    working.ts            WorkingMessage: the "⏳ Working…" message with Stop while a turn runs
     permissions.ts        PermissionBroker: canUseTool → buttons, per chat
-    limiter.ts            per-chat budget for best-effort traffic (drafts, status edits)
+    limiter.ts            per-chat budget for best-effort traffic (drafts, preview and working-message edits)
     media.ts              photo/document download
-    tools.ts              tool icons and one-line summaries
+    tools.ts              tool icons and one-line summaries (permission prompts, /export)
   domain/
     chats.ts              ChatService: per-user active project and defaults; claimStateForBot
     projects.ts           ProjectService: validation, active project
@@ -329,14 +330,14 @@ interface State {
   projects: Record<string, { name: string; path: string; addedAt: number }>;
   chats: Record<string /* chatId */, {
     activeProject: string;
-    defaults: { model?: string; permissionMode: PermissionMode; effort?: Effort; verbose: boolean };
+    defaults: { model?: string; permissionMode: PermissionMode; effort?: Effort; thinking: boolean };
     threads: Record<string /* threadId */, {
       threadId: number;
       sessionId: string;           // current session of the chat
       started: boolean;            // transcript exists → resume instead of create
       project: string; cwd: string;  // snapshot at creation
       title: string; titleSource: "placeholder" | "auto" | "user";
-      model?: string; permissionMode: PermissionMode; effort?: Effort; verbose: boolean;
+      model?: string; permissionMode: PermissionMode; effort?: Effort; thinking: boolean;
       createdAt: number; lastActiveAt: number;
     }>;
   }>;
@@ -366,8 +367,13 @@ interface State {
 3. `SessionPool.send`: the process is reused if it is live; otherwise a slot is reserved and the process
    starts (or resumes) from the chat's spec.
 4. SDK messages flow `pool → ThreadService.observe` (session ID, `started`, activity) and
-   `→ TurnRenderer` (preview, tool status, final reply).
-5. `result`: the turn ends. If nothing else keeps the session BUSY, the idle timer starts.
+   `→ TurnRenderer`. From the start of the turn the typing action runs and, after 2 s, a silent
+   `⏳ Working…` message with a Stop button (`WorkingMessage`) sits at the bottom of the chat; anything
+   sent meanwhile goes above it, and while a prompt waits for the user (`PermissionBroker.onBlocked`)
+   both pause. Text that a tool call follows was a note on the way and is dropped; text still held when
+   the result arrives is the answer. With `/thinking` on, notes, thinking summaries and a live preview are
+   sent as they come. Tool calls are never shown ([0012](decisions/0012-chats-show-answers-not-work.md)).
+5. `result`: the working message is deleted, then the answer is sent (so it notifies). The turn ends. If nothing else keeps the session BUSY, the idle timer starts.
 
 **Eviction and resume.** The idle timer fires, or the LRU entry is evicted for another chat. The process
 closes and the state becomes COLD. Nothing is sent to the user. The next message runs the start path
@@ -418,7 +424,9 @@ no chat left to report it in). The session stays resumable.
   100 menu commands.
 - Markdown is converted to Telegram HTML. If Telegram rejects the markup, the message is resent as plain
   text. Long replies are split fence-safely, and very long ones are sent as a `.md` file.
-- Live previews use `sendMessageDraft` and fall back to editing a placeholder message.
+- Live previews (chats with `/thinking` on) use `sendMessageDraft` and fall back to editing a placeholder
+  message. Without `/thinking`, text can't be told from a note until the turn ends, so the answer is sent
+  whole.
 
 ---
 

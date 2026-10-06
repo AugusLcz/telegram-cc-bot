@@ -4,7 +4,7 @@ import path from "node:path";
 import { Bot } from "grammy";
 import type { Update, UserFromGetMe } from "grammy/types";
 import { createApp } from "../../src/app/bot.ts";
-import type { App } from "../../src/app/context.ts";
+import type { App, WorkingTiming } from "../../src/app/context.ts";
 import type { SessionApi } from "../../src/claude/sessions.ts";
 import { loadConfig } from "../../src/core/config.ts";
 import type { Exec } from "../../src/core/exec.ts";
@@ -26,6 +26,8 @@ export interface HarnessOptions {
   reject?: (method: string, payload: Record<string, unknown>) => string | undefined;
   getUpdates?: (signal?: { addEventListener(type: "abort", fn: () => void): void }) => Promise<Update[]>;
   exec?: Exec;
+  /** Working message timing; by default it never shows within a test. */
+  working?: WorkingTiming;
 }
 
 /** A bot wired to fake Telegram, fake Claude Code processes and an in-memory store. */
@@ -97,6 +99,7 @@ export function harness(opts: HarnessOptions = {}) {
     sessions,
     log: silentLogger,
     exec: opts.exec,
+    working: opts.working ?? { delayMs: 60_000 },
   });
   app.catalog.update({
     commands: [

@@ -1,15 +1,17 @@
 import type { Api } from "grammy";
+import type { InlineKeyboardMarkup } from "grammy/types";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { StreamMode } from "../core/config.ts";
 import { silentLogger, type Logger } from "../core/logger.ts";
 import type { Target } from "../core/types.ts";
 import { escapeHtml, tail, truncate } from "./format.ts";
 import type { ChatBudget } from "./limiter.ts";
-import { editHtml, sendDraft, sendHtml, sendMarkdown, sendPlain, sendTyping, TopicGoneError } from "./send.ts";
-import { displayToolName, toolIcon, toolSummary } from "./tools.ts";
+import { sendDraft, sendHtml, sendMarkdown, sendPlain, sendTyping, TopicGoneError } from "./send.ts";
+import { displayToolName } from "./tools.ts";
+import { WorkingMessage } from "./working.ts";
 
 const PREVIEW_LIMIT = 3900;
-const STATUS_MAX_LINES = 20;
+const THINKING_LIMIT = 3500;
 
 type ContentBlock = { type: string; [k: string]: unknown };
 
@@ -19,24 +21,33 @@ export interface StreamModeRef {
 }
 
 export interface RenderOptions {
-  verbose: () => boolean;
+  /** Show Claude's notes between steps, its thinking and timings: the chat's /thinking. */
+  thinking: () => boolean;
   stream: StreamModeRef;
   budget: ChatBudget;
+  /** Buttons on the working message (Stop). */
+  workingKeyboard?: InlineKeyboardMarkup;
+  workingDelayMs?: number;
+  workingTickMs?: number;
   log?: Logger;
   /** A background update found the tab deleted. */
   onTopicGone?: (err: TopicGoneError) => void;
 }
 
 /**
- * Renders one tab's SDK message stream: a live preview of text being
- * generated, a compact status message per run of tool calls, and final
- * Markdown as Telegram HTML. One instance per tab.
+ * Renders one tab's SDK message stream. By default a chat shows Claude's
+ * answers only: text that a tool call follows was a note on the way, so text
+ * is held until the turn's result shows it was the last. With /thinking on,
+ * notes, thinking summaries and a live preview are shown as they come. Tool
+ * calls are never shown. While a turn runs, a working message and the typing
+ * action say so. One instance per tab.
  */
 export class TurnRenderer {
   private readonly api: Api;
   readonly target: Target;
   private readonly opts: RenderOptions;
   private readonly log: Logger;
+  private readonly working: WorkingMessage;
 
   private text = "";
   private draftId = 0;
@@ -45,11 +56,9 @@ export class TurnRenderer {
   private lastPreviewAt = 0;
   private previewGen = 0;
 
-  private statusMsgId: number | null = null;
-  private statusLines: string[] = [];
-  private statusHidden = 0;
-  private statusTimer: NodeJS.Timeout | null = null;
-
+  /** Text of this turn that no tool call followed (yet): the answer, if the turn ends now. */
+  private pending: string[] = [];
+  private blockedCount = 0;
   private typingTimer: NodeJS.Timeout | null = null;
   private turnHadOutput = false;
   private lastRateLimit = "";
@@ -59,11 +68,39 @@ export class TurnRenderer {
     this.target = target;
     this.opts = opts;
     this.log = opts.log ?? silentLogger;
+    this.working = new WorkingMessage(api, target, {
+      budget: opts.budget,
+      keyboard: opts.workingKeyboard,
+      delayMs: opts.workingDelayMs,
+      tickMs: opts.workingTickMs,
+      log: this.log,
+      onTopicGone: opts.onTopicGone,
+    });
   }
 
   /** A message was sent to Claude (it may still wait for a process or behind a running turn). */
   beginTurn(): void {
-    this.startTyping();
+    this.working.start();
+    if (!this.blockedCount) this.startTyping();
+  }
+
+  /** The turn ended without a result (the send failed, a queued message was cancelled). */
+  async endTurn(): Promise<void> {
+    this.stopTyping();
+    await this.working.stop();
+  }
+
+  /** A permission prompt or question opened (+1) or closed (-1); Claude waits for the user meanwhile. */
+  blocked(delta: number): void {
+    const was = this.blockedCount;
+    this.blockedCount = Math.max(0, was + delta);
+    if (!was && this.blockedCount) {
+      this.stopTyping();
+      void this.working.pause();
+    } else if (was && !this.blockedCount && this.working.active) {
+      this.startTyping();
+      void this.working.resume();
+    }
   }
 
   private startTyping(): void {
@@ -74,7 +111,7 @@ export class TurnRenderer {
     this.typingTimer.unref();
   }
 
-  stopTyping(): void {
+  private stopTyping(): void {
     if (this.typingTimer) clearInterval(this.typingTimer);
     this.typingTimer = null;
   }
@@ -83,13 +120,11 @@ export class TurnRenderer {
   dispose(): void {
     this.stopTyping();
     this.cancelPreview();
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.statusTimer = null;
-    this.statusMsgId = null;
-    this.statusLines = [];
-    this.statusHidden = 0;
+    this.working.dispose();
     this.previewMsgId = null;
     this.text = "";
+    this.pending = [];
+    this.blockedCount = 0;
     this.turnHadOutput = false;
   }
 
@@ -109,36 +144,18 @@ export class TurnRenderer {
       }
 
       case "assistant": {
-        const blocks = msg.message.content as unknown as ContentBlock[];
-        if (msg.parent_tool_use_id) {
-          for (const b of blocks) if (b.type === "tool_use") await this.addStatus(this.toolLine(b, "  ↳ "));
-          return;
-        }
-        for (const b of blocks) {
+        if (msg.parent_tool_use_id) return; // a subagent's work stays out of the chat
+        const thinking = this.opts.thinking();
+        for (const b of msg.message.content as unknown as ContentBlock[]) {
           if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
-            await this.sendText(msg.error ? `❌ ${b.text}` : b.text);
+            if (msg.error) await this.sendText(`❌ ${b.text}`);
+            else if (thinking) await this.sendText(b.text);
+            else this.pending.push(b.text);
           } else if (b.type === "tool_use") {
-            await this.addStatus(this.toolLine(b));
+            this.pending = []; // a note on the way, not the answer
+          } else if (b.type === "thinking" && thinking && typeof b.thinking === "string" && b.thinking.trim()) {
+            await this.notice(`💭 <blockquote expandable>${escapeHtml(truncate(b.thinking.trim(), THINKING_LIMIT))}</blockquote>`);
           }
-        }
-        return;
-      }
-
-      case "user": {
-        if (!this.opts.verbose() || msg.parent_tool_use_id) return;
-        const content = msg.message.content;
-        if (!Array.isArray(content)) return;
-        for (const b of content as unknown as ContentBlock[]) {
-          if (b.type !== "tool_result") continue;
-          const out =
-            typeof b.content === "string"
-              ? b.content
-              : Array.isArray(b.content)
-                ? (b.content as ContentBlock[]).map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n")
-                : "";
-          if (!out.trim()) continue;
-          await this.closeStatus();
-          await sendHtml(this.api, this.target, `${b.is_error ? "⚠️" : "↩️"} <pre>${escapeHtml(truncate(out.trim(), 1500))}</pre>`);
         }
         return;
       }
@@ -146,12 +163,11 @@ export class TurnRenderer {
       case "system":
         switch (msg.subtype) {
           case "init": // start of a turn
-            this.startTyping();
+            this.beginTurn();
             return;
           case "local_command_output":
             this.turnHadOutput = true;
-            await this.closeStatus();
-            await sendMarkdown(this.api, this.target, msg.content);
+            await this.working.sendAbove(() => sendMarkdown(this.api, this.target, msg.content));
             return;
           case "compact_boundary": {
             const { pre_tokens, post_tokens } = msg.compact_metadata;
@@ -170,7 +186,9 @@ export class TurnRenderer {
             }
             return;
           case "permission_denied":
-            await this.addStatus(`⛔ ${escapeHtml(displayToolName(msg.tool_name))} denied: ${escapeHtml(truncate(msg.message, 150))}`);
+            if (this.opts.thinking()) {
+              await this.notice(`⛔ ${escapeHtml(displayToolName(msg.tool_name))} denied: ${escapeHtml(truncate(msg.message, 150))}`);
+            }
             return;
           case "informational":
             if (msg.level === "warning" || msg.level === "notice") await this.notice(`ℹ️ ${escapeHtml(msg.content)}`);
@@ -200,7 +218,10 @@ export class TurnRenderer {
       case "result": {
         this.stopTyping();
         this.cancelPreview();
-        await this.flushStatus();
+        await this.working.stop();
+        const answer = this.pending;
+        this.pending = [];
+        for (const text of answer) await this.sendText(text);
         if (msg.subtype !== "success") {
           const why = msg.errors?.length ? msg.errors.join("\n") : msg.subtype;
           await this.notice(`❌ ${escapeHtml(truncate(why, 1000))}`);
@@ -210,40 +231,29 @@ export class TurnRenderer {
         } else if (!this.turnHadOutput && msg.result?.trim()) {
           await sendMarkdown(this.api, this.target, msg.result);
         }
-        if (this.opts.verbose()) {
+        if (this.opts.thinking()) {
           await this.notice(`<i>⏱ ${(msg.duration_ms / 1000).toFixed(1)}s · ${msg.num_turns} turns</i>`);
         }
-        this.statusMsgId = null;
-        this.statusLines = [];
-        this.statusHidden = 0;
         this.turnHadOutput = false;
         return;
       }
     }
   }
 
-  private toolLine(b: ContentBlock, prefix = ""): string {
-    const name = String(b.name);
-    const summary = toolSummary(name, (b.input ?? {}) as Record<string, unknown>, 120);
-    return `${prefix}${toolIcon(name)} <b>${escapeHtml(displayToolName(name))}</b>${summary ? ` <code>${escapeHtml(summary)}</code>` : ""}`;
-  }
-
-  /** Send a short standalone HTML notice, after closing the current status block. */
+  /** Send a short standalone HTML notice (above the working message). */
   async notice(html: string): Promise<void> {
-    await this.closeStatus();
-    await sendHtml(this.api, this.target, html);
+    await this.working.sendAbove(() => sendHtml(this.api, this.target, html));
   }
 
   private async sendText(text: string): Promise<void> {
     this.turnHadOutput = true;
     this.previewGen++;
     this.cancelPreview();
-    await this.closeStatus();
     if (this.previewMsgId) {
       await this.api.deleteMessage(this.target.chatId, this.previewMsgId).catch(() => {});
       this.previewMsgId = null;
     }
-    await sendMarkdown(this.api, this.target, text);
+    await this.working.sendAbove(() => sendMarkdown(this.api, this.target, text));
     this.text = "";
   }
 
@@ -255,10 +265,10 @@ export class TurnRenderer {
     };
   }
 
-  // ---- live preview ------------------------------------------------------
+  // ---- live preview (only with /thinking on: until the turn ends, text may be a note) ----
 
   private schedulePreview(): void {
-    if (this.opts.stream.mode === "off" || this.previewTimer) return;
+    if (!this.opts.thinking() || this.opts.stream.mode === "off" || this.previewTimer) return;
     const interval = this.opts.stream.mode === "draft" ? 700 : 1500;
     const wait = Math.max(0, this.lastPreviewAt + interval - Date.now());
     this.previewTimer = setTimeout(() => {
@@ -294,59 +304,10 @@ export class TurnRenderer {
       await this.api.editMessageText(this.target.chatId, this.previewMsgId, text).catch(() => {});
     } else {
       const gen = this.previewGen;
-      const id = await sendPlain(this.api, this.target, text);
+      const id = await this.working.sendAbove(() => sendPlain(this.api, this.target, text));
       // The final text was sent while this request was in flight: drop the stale preview.
       if (gen !== this.previewGen) await this.api.deleteMessage(this.target.chatId, id).catch(() => {});
       else this.previewMsgId = id;
     }
-  }
-
-  // ---- tool status -------------------------------------------------------
-
-  private async addStatus(line: string): Promise<void> {
-    this.statusLines.push(line);
-    if (this.statusLines.length > STATUS_MAX_LINES) {
-      this.statusLines.shift();
-      this.statusHidden++;
-    }
-    if (this.statusMsgId === null) {
-      // Create immediately so it stays in order with the text around it.
-      this.statusMsgId = await sendHtml(this.api, this.target, this.statusHtml());
-      return;
-    }
-    this.scheduleStatus();
-  }
-
-  private scheduleStatus(): void {
-    if (this.statusTimer) return;
-    this.statusTimer = setTimeout(() => {
-      this.statusTimer = null;
-      if (!this.opts.budget.take(this.target.chatId)) {
-        this.scheduleStatus();
-        return;
-      }
-      this.flushStatus().catch(this.background("status edit"));
-    }, 1000);
-  }
-
-  private statusHtml(): string {
-    const hidden = this.statusHidden ? `<i>…${this.statusHidden} earlier</i>\n` : "";
-    return hidden + this.statusLines.join("\n");
-  }
-
-  private async flushStatus(): Promise<void> {
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.statusTimer = null;
-    if (this.statusMsgId !== null && this.statusLines.length) {
-      await editHtml(this.api, this.target, this.statusMsgId, this.statusHtml());
-    }
-  }
-
-  /** Finish the current status message; later tool calls start a new one below. */
-  private async closeStatus(): Promise<void> {
-    await this.flushStatus();
-    this.statusMsgId = null;
-    this.statusLines = [];
-    this.statusHidden = 0;
   }
 }

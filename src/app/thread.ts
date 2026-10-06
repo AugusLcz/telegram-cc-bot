@@ -58,7 +58,7 @@ export function startTurn(app: App, key: ThreadKey, content: UserContent, prompt
       }
     })
     .catch(async (err) => {
-      renderer.stopTyping();
+      await renderer.endTurn();
       if (err instanceof StartCancelledError) return;
       if (err instanceof TopicGoneError) return app.onTopicGone(key);
       if (err instanceof UserError) return void (await renderer.notice(`⚠️ ${err.message}`).catch(() => {}));
@@ -123,12 +123,17 @@ export function chatCommand(def: Omit<CommandDef<App>, "run" | "group"> & { run:
   };
 }
 
-const stop: ChatRun = async (app, { ctx }, key) => {
+/** Interrupt the chat's turn, or cancel its queued message; says which. */
+async function stopTurn(app: App, key: ThreadKey): Promise<string> {
   app.broker.cancel(key);
   const unqueued = app.pool.cancelWaiting(key);
   const stopped = await app.pool.interrupt(key);
-  if (!stopped) app.renderers.get(key).stopTyping();
-  await reply(app, ctx, stopped ? "⏹ Interrupted" : unqueued ? "⏹ Cancelled the queued message" : "Nothing is running");
+  if (!stopped) await app.renderers.get(key).endTurn();
+  return stopped ? "⏹ Interrupted" : unqueued ? "⏹ Cancelled the queued message" : "Nothing is running";
+}
+
+const stop: ChatRun = async (app, { ctx }, key) => {
+  await reply(app, ctx, await stopTurn(app, key));
 };
 
 const model: ChatRun = async (app, { ctx, args }, key) => {
@@ -170,10 +175,16 @@ const effort: ChatRun = async (app, { ctx, args }, key) => {
     choiceKeyboard("tf", effortOptions(), record.effort ?? "default"));
 };
 
-const verbose: ChatRun = async (app, { ctx }, key) => {
-  const next = !ensureRecord(app, key).verbose;
-  app.threads.setVerbose(key, next);
-  await reply(app, ctx, next ? "🔊 Verbose on: tool output and timings" : "🔈 Verbose off");
+const thinking: ChatRun = async (app, { ctx }, key) => {
+  const next = !ensureRecord(app, key).thinking;
+  await app.threads.setThinking(key, next);
+  await reply(
+    app,
+    ctx,
+    next
+      ? "💭 Thinking on: Claude's notes between steps, its thinking summaries and timings"
+      : "Thinking off: only Claude's answers",
+  );
 };
 
 const rename: ChatRun = async (app, { ctx, args }, key) => {
@@ -192,9 +203,9 @@ const fork: ChatRun = async (app, { ctx }, key) => {
 
 const close: ChatRun = async (app, { ctx }, key) => {
   const wasLive = app.pool.state(key) !== "cold";
+  app.renderers.dispose(key);
   app.broker.cancel(key);
   await app.threads.closeTab(key);
-  app.renderers.dispose(key);
   await reply(app, ctx, wasLive ? "💤 Hibernated. Send a message to pick it up again." : "Nothing is running in this chat.");
 };
 
@@ -231,7 +242,9 @@ export function registerThread(app: App): void {
     .register(chatCommand({ name: "model", usage: "[name]", description: "Model for this chat", run: model }))
     .register(chatCommand({ name: "mode", usage: "[mode]", description: "Permission mode for this chat", run: mode }))
     .register(chatCommand({ name: "effort", usage: "[level]", description: "Effort for this chat", run: effort }))
-    .register(chatCommand({ name: "verbose", description: "Toggle tool output for this chat", run: verbose }))
+    .register(
+      chatCommand({ name: "thinking", aliases: ["verbose"], description: "Show Claude's notes and thinking in this chat", run: thinking }),
+    )
     .register(chatCommand({ name: "rename", usage: "<title>", description: "Rename this chat and its session", run: rename }))
     .register(chatCommand({ name: "fork", aliases: ["branch"], description: "Copy this session into a new chat", run: fork }))
     .register(chatCommand({ name: "close", description: "Hibernate now (resumes on next message)", run: close }))
@@ -263,13 +276,17 @@ export function registerThread(app: App): void {
     .on("del", async (app, ctx) => {
       const key = chatKey(ctx);
       await ctx.answerCallbackQuery({ text: "Deleting…" });
-      app.broker.cancel(key);
       app.renderers.dispose(key);
+      app.broker.cancel(key);
       app.announced.delete(key);
       await app.threads.deleteTab(key);
     })
     .on("delx", async (app, ctx) => {
       await ctx.answerCallbackQuery();
       await settle(app, ctx, "Kept.");
+    })
+    .on("stop", async (app, ctx) => {
+      // The Stop button of the working message, which goes away with the turn.
+      await ctx.answerCallbackQuery({ text: await stopTurn(app, chatKey(ctx)) });
     });
 }

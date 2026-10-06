@@ -115,6 +115,7 @@ export class ThreadService {
       model: r.model,
       permissionMode: r.permissionMode,
       effort: r.effort,
+      showThinking: r.thinking,
     };
   }
 
@@ -286,8 +287,9 @@ export class ThreadService {
     await this.d.pool.setEffort(key, effort);
   }
 
-  setVerbose(key: ThreadKey, verbose: boolean): void {
-    this.patch(key, { verbose });
+  async setThinking(key: ThreadKey, thinking: boolean): Promise<void> {
+    this.patch(key, { thinking });
+    await this.d.pool.setShowThinking(key, thinking);
   }
 
   /** /rename: the session and the tab. */
@@ -390,7 +392,7 @@ export class ThreadService {
       model: defaults.model,
       permissionMode: defaults.permissionMode,
       effort: defaults.effort,
-      verbose: defaults.verbose,
+      thinking: defaults.thinking,
       createdAt: now,
       lastActiveAt: now,
     };

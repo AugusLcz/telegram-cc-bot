@@ -26,6 +26,8 @@ export interface ProcessSpec {
   model?: string;
   permissionMode: PermissionMode;
   effort?: Effort;
+  /** Ask the API for thinking summaries (otherwise thinking may arrive without text). */
+  showThinking?: boolean;
 }
 
 export interface ProcessHooks {
@@ -62,6 +64,7 @@ export interface ProcessHandle {
   setModel(model: string | undefined): Promise<void>;
   setPermissionMode(mode: PermissionMode): Promise<void>;
   setEffort(effort: Effort | undefined): Promise<void>;
+  setShowThinking(on: boolean): Promise<void>;
   contextUsage(): Promise<ContextUsage | null>;
   /** Slash commands and skills as Claude Code sees them now (asked afresh). */
   supportedCommands(): Promise<SlashCommand[]>;
@@ -195,6 +198,7 @@ export class SdkProcess implements ProcessHandle {
       await this.close();
       throw err;
     }
+    if (s.showThinking) await this.setShowThinking(true);
   }
 
   private async consume(q: Query): Promise<void> {
@@ -258,6 +262,19 @@ export class SdkProcess implements ProcessHandle {
 
   async setEffort(effort: Effort | undefined): Promise<void> {
     await this.q?.applyFlagSettings({ effortLevel: effort ?? null });
+  }
+
+  /**
+   * Thinking summaries on, or back to Claude Code's default display (on recent
+   * models: thinking without text). A null budget keeps the session's own.
+   * Best effort: without it a chat still shows Claude's notes.
+   */
+  async setShowThinking(on: boolean): Promise<void> {
+    try {
+      await this.q?.setMaxThinkingTokens(null, on ? "summarized" : null);
+    } catch (err) {
+      this.log.warn("thinking display not applied:", err);
+    }
   }
 
   get backgroundTasks(): number {

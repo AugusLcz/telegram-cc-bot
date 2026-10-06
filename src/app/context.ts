@@ -1,4 +1,4 @@
-import type { Api } from "grammy";
+import { InlineKeyboard, type Api } from "grammy";
 import type { CommandCatalog } from "../claude/catalog.ts";
 import type { CommandNameMap } from "../claude/cmdnames.ts";
 import type { SessionPool } from "../claude/pool.ts";
@@ -17,7 +17,7 @@ import type { ChatBudget } from "../telegram/limiter.ts";
 import type { PermissionBroker } from "../telegram/permissions.ts";
 import { TurnRenderer, type StreamModeRef } from "../telegram/render.ts";
 import type { TopicGoneError } from "../telegram/send.ts";
-import type { CallbackRouter, CommandRegistry } from "./registry.ts";
+import { callbackData, type CallbackRouter, type CommandRegistry } from "./registry.ts";
 
 export interface BotInfo {
   username: string;
@@ -63,28 +63,38 @@ export interface App {
   onTopicGone(key: ThreadKey): Promise<void>;
 }
 
+/** Timing of the working message (shorter in tests). */
+export interface WorkingTiming {
+  delayMs?: number;
+  tickMs?: number;
+}
+
 /** One TurnRenderer per tab, created on demand. */
 export class RendererRegistry {
   private readonly map = new Map<ThreadKey, TurnRenderer>();
   private readonly api: Api;
   private readonly stream: StreamModeRef;
   private readonly budget: ChatBudget;
-  private readonly verbose: (key: ThreadKey) => boolean;
+  private readonly thinking: (key: ThreadKey) => boolean;
+  private readonly working: WorkingTiming;
   private readonly log: Logger;
   private readonly onGone: (key: ThreadKey, err: TopicGoneError) => void;
+  private readonly stopKeyboard = new InlineKeyboard().text("⏹ Stop", callbackData("stop", ""));
 
   constructor(opts: {
     api: Api;
     stream: StreamModeRef;
     budget: ChatBudget;
-    verbose: (key: ThreadKey) => boolean;
+    thinking: (key: ThreadKey) => boolean;
+    working?: WorkingTiming;
     log: Logger;
     onGone: (key: ThreadKey, err: TopicGoneError) => void;
   }) {
     this.api = opts.api;
     this.stream = opts.stream;
     this.budget = opts.budget;
-    this.verbose = opts.verbose;
+    this.thinking = opts.thinking;
+    this.working = opts.working ?? {};
     this.log = opts.log;
     this.onGone = opts.onGone;
   }
@@ -93,15 +103,23 @@ export class RendererRegistry {
     let r = this.map.get(key);
     if (!r) {
       r = new TurnRenderer(this.api, targetOfKey(key), {
-        verbose: () => this.verbose(key),
+        thinking: () => this.thinking(key),
         stream: this.stream,
         budget: this.budget,
+        workingKeyboard: this.stopKeyboard,
+        workingDelayMs: this.working.delayMs,
+        workingTickMs: this.working.tickMs,
         log: this.log.child(key),
         onTopicGone: (err) => this.onGone(key, err),
       });
       this.map.set(key, r);
     }
     return r;
+  }
+
+  /** The tab's renderer if it has one (without creating it). */
+  find(key: ThreadKey): TurnRenderer | undefined {
+    return this.map.get(key);
   }
 
   dispose(key: ThreadKey): void {

@@ -22,7 +22,7 @@ import { PermissionBroker } from "../telegram/permissions.ts";
 import { sendHtml, TopicGoneError } from "../telegram/send.ts";
 import { keyOf, sequenceKey, targetOf } from "../telegram/target.ts";
 import { titleFromPrompt, TelegramTopics } from "../telegram/topics.ts";
-import { RendererRegistry, type App, type BotInfo } from "./context.ts";
+import { RendererRegistry, type App, type BotInfo, type WorkingTiming } from "./context.ts";
 import { registerControl } from "./control.ts";
 import { registerInspect } from "./inspect.ts";
 import { registerSkills } from "./skills.ts";
@@ -40,6 +40,8 @@ export interface CreateAppOptions {
   log: Logger;
   /** Defaults to running the program for real. */
   exec?: Exec;
+  /** Timing of the working message; defaults suit Telegram. */
+  working?: WorkingTiming;
 }
 
 /** Build every service, wire the pool to Telegram and install the update handlers on `bot`. */
@@ -52,7 +54,7 @@ export function createApp(opts: CreateAppOptions): App {
     model: cfg.defaultModel,
     permissionMode: cfg.defaultPermissionMode,
     effort: cfg.defaultEffort,
-    verbose: false,
+    thinking: false,
   }));
   const projects = new ProjectService(store, chats, { allowedRoots: cfg.allowedRoots });
   projects.bootstrap(cfg.defaultCwd);
@@ -87,8 +89,8 @@ export function createApp(opts: CreateAppOptions): App {
         }
       },
       onExit: (key, reason, error) => {
-        app.broker.cancel(key);
         app.renderers.dispose(key);
+        app.broker.cancel(key);
         log.info(`session ${key} hibernated (${reason})`);
         if (reason === "crash") {
           const why = error instanceof Error ? error.message : String(error ?? "unknown error");
@@ -122,12 +124,18 @@ export function createApp(opts: CreateAppOptions): App {
     api,
     stream: { mode: cfg.streamMode },
     budget: new ChatBudget(),
-    verbose: (key) => threads.get(key)?.verbose ?? false,
+    thinking: (key) => threads.get(key)?.thinking ?? false,
+    working: opts.working,
     log,
     onGone: (key) => void app.onTopicGone(key),
   });
 
-  const broker = new PermissionBroker(api, cfg.permissionTimeoutMs, { onBlocked: (key, d) => pool.setBlocked(key, d) }, log.child("prompts"));
+  const broker = new PermissionBroker(api, cfg.permissionTimeoutMs, {
+    onBlocked: (key, d) => {
+      pool.setBlocked(key, d);
+      renderers.find(key)?.blocked(d);
+    },
+  }, log.child("prompts"));
 
   Object.assign(app, {
     cfg,

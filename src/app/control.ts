@@ -216,14 +216,14 @@ function settingsView(app: App, chatId: number): { html: string; kb: InlineKeybo
     `🧠 Model: <code>${escapeHtml(d.model ?? "default")}</code>\n` +
     `🔐 Permission mode: <code>${d.permissionMode}</code>\n` +
     `🎚 Effort: <code>${d.effort ?? "default"}</code>\n` +
-    `🔊 Verbose: ${d.verbose ? "on" : "off"}\n\n` +
-    `<i>Existing chats keep their own settings: use /model, /mode, /effort, /verbose inside them.</i>`;
+    `💭 Thinking: ${d.thinking ? "on" : "off"}\n\n` +
+    `<i>Existing chats keep their own settings: use /model, /mode, /effort, /thinking inside them.</i>`;
   const kb = new InlineKeyboard()
     .text("🧠 Model", callbackData("set", "model"))
     .text("🔐 Mode", callbackData("set", "mode"))
     .row()
     .text("🎚 Effort", callbackData("set", "effort"))
-    .text(`🔊 Verbose ${d.verbose ? "off" : "on"}`, callbackData("set", "verbose"));
+    .text(`💭 Thinking ${d.thinking ? "off" : "on"}`, callbackData("set", "thinking"));
   return { html, kb };
 }
 
@@ -240,8 +240,9 @@ async function onSettingsButton(app: App, ctx: Context, field: string): Promise<
     if (msgId) await editHtml(app.api, targetOf(ctx)!, msgId, html, kb);
   };
   await ctx.answerCallbackQuery();
-  if (field === "verbose") {
-    app.chats.setDefaults(chatId, { verbose: !d.verbose });
+  if (field === "thinking" || field === "verbose") {
+    // "verbose": buttons sent before /verbose became /thinking.
+    app.chats.setDefaults(chatId, { thinking: !d.thinking });
     const v = settingsView(app, chatId);
     await show(v.html, v.kb);
   } else if (field === "model") {
@@ -279,7 +280,7 @@ async function sessionStatus(app: App, key: ThreadKey): Promise<string[]> {
     `💬 <b>${escapeHtml(truncate(r.title, 80))}</b>`,
     `🆔 <code>${r.sessionId}</code>${r.started ? "" : " (not started)"}`,
     `📁 ${escapeHtml(r.project)} · <code>${escapeHtml(r.cwd)}</code>`,
-    `🧠 ${escapeHtml(r.model ?? "default")} · 🔐 ${r.permissionMode} · 🎚 ${r.effort ?? "default"}${r.verbose ? " · verbose" : ""}`,
+    `🧠 ${escapeHtml(r.model ?? "default")} · 🔐 ${r.permissionMode} · 🎚 ${r.effort ?? "default"}${r.thinking ? " · 💭 thinking" : ""}`,
     `${STATE_ICON[state]} Process: ${state === "cold" ? "hibernated (resumes on your next message)" : state}`,
   ];
   if (usage) {

@@ -21,13 +21,14 @@
 ## 功能
 
 - **并行会话**：多个对话可以同时工作，各自有项目目录、模型、权限模式和 effort。
-- **流式回复**：用 `sendMessageDraft` 实时预览，不可用时自动改成编辑消息。最终回复把 Markdown 转成 Telegram HTML；太长会安全切分（代码块不会被切断），特别长的转成 `.md` 文件发送。
-- **工具调用压缩显示**：例如 `💻 Bash ls -la`，子代理的调用缩进显示。`/verbose` 额外显示工具输出和耗时。
+- **只发回答**：对话里只出现 Claude 的回答。它在步骤之间的旁白、思考过程和工具调用都不显示，所以一个长任务最后只有一条回复，并且会提醒你。回复把 Markdown 转成 Telegram HTML；太长会安全切分（代码块不会被切断），特别长的转成 `.md` 文件发送。
+- **工作中提示**：Claude 工作时，对话最底部有一条 `⏳ Working… 1m 20s`（静默发送，带 ⏹ Stop 按钮），回答到达时被替换；等你确认权限或回答问题时它会暂时消失。同时也会显示“正在输入”。
+- **按需显示思考**：`/thinking` 打开后，这个对话会显示 Claude 的旁白、思考摘要和耗时，文字边写边实时预览（`STREAM_MODE`）。工具调用无论如何都不显示。
 - **提示变成按钮**：权限请求（允许 / 总是允许 / 拒绝）、`AskUserQuestion`（单选、多选）、计划审批，都显示在发起请求的那个对话里。有提示等待时直接回复文字，等于拒绝并告诉 Claude 该怎么做，或者用你自己的话回答问题。
 - **完整的 Claude Code 命令**：内置命令、自带 skills、你的个人和项目 skills、插件命令、`.claude/commands` 在每个对话里都能用，也会出现在 Telegram 命令菜单里。
 - **对话标题**：你没起名的对话会用第一句提问自动命名，你自己起的名字不会被覆盖。`/rename` 同时修改对话名和会话名。
 - **图片和文件**：图片直接发给 Claude 看；文件存到 `<项目>/.tg-uploads/`，再把路径告诉 Claude。
-- **状态提示**：上下文压缩、API 重试、用量预警、权限被拒都会提示。`/status` 同时显示当前对话的会话（含上下文占用）和 bot 的进程池状态。
+- **状态提示**：上下文压缩、API 重试、用量预警都会提示（打开 `/thinking` 时，权限被拒也会提示）。`/status` 同时显示当前对话的会话（含上下文占用）和 bot 的进程池状态。
 - bot 自身的界面消息（按钮、提示、命令说明）是英文；Claude 的回复语言跟随你的提问。
 
 ## 命令
@@ -40,7 +41,7 @@
 |---|---|
 | `/stop` | 中断当前回合，取消待处理的提示，以及还在排队等进程的消息 |
 | `/model [名称]` · `/mode [模式]` · `/effort [等级]` | 查看（按钮）或修改这个对话的模型、权限模式、effort；第一条消息之前也能设置 |
-| `/verbose` | 开关这个对话的工具输出和耗时 |
+| `/thinking` | 开关这个对话的旁白、思考摘要和耗时（默认关，只发回答）。`/verbose` 仍然可用 |
 | `/rename <标题>` | 重命名这个对话和它的会话 |
 | `/fork`（`/branch`） | 把这个会话复制到一个新对话 |
 | `/close` | 立即关闭这个对话的进程；下一条消息会自动恢复 |
@@ -66,7 +67,7 @@
 | `/projects` | 列出项目，按钮切换当前项目 |
 | `/project add <名称> <路径>` | 登记一个项目目录（必须存在，设置了 `ALLOWED_ROOTS` 时必须在其范围内），并设为当前项目 |
 | `/project use <名称>` · `/project rm <名称>` | 切换当前项目（当前对话还没和 Claude 说过话时也一起切换） · 删除项目 |
-| `/settings` | 新对话的默认模型、权限模式、effort、verbose |
+| `/settings` | 新对话的默认模型、权限模式、effort、thinking |
 | `/plugin [list\|install\|uninstall\|enable\|disable\|update\|marketplace …]` | 用 `claude plugin` CLI 管理 Claude Code 插件；当前对话的会话会重新加载 |
 
 没有 `/new`：回到 bot 主屏幕打字就是新对话。
@@ -201,7 +202,7 @@ sudo bash deploy/deploy.sh
 | `BACKGROUND_MAX_MINUTES` | `120` | 只剩后台任务在跑的进程，多久后关闭 |
 | `CLAUDE_PATH` | SDK 自带 | 改用系统安装的 `claude` |
 | `STATE_FILE` | `./data/state.json` | 项目、对话与会话的对应关系、设置的存储位置 |
-| `STREAM_MODE` | `draft` | 实时预览：`draft` / `edit` / `off` |
+| `STREAM_MODE` | `draft` | `/thinking` 打开的对话里的实时预览：`draft` / `edit` / `off` |
 | `PERMISSION_TIMEOUT_MS` | `600000` | 提示无人响应时多久后自动拒绝 |
 | `LOG_LEVEL` | `info` | 设为 `debug` 时也记录 Claude Code 的 stderr |
 | `CLAUDE_CODE_OAUTH_TOKEN` | 不设置 | 可选，`claude setup-token` 生成的长期 token |
@@ -221,7 +222,7 @@ sudo bash deploy/deploy.sh
 | 出现 "⏳ waiting for a free slot" | `MAX_LIVE_SESSIONS` 个进程都在忙。等一下、在别的对话里用 `/stop`，或调高上限 |
 | 提示 "Auto mode isn't available…" | 部分账户或模型会这样。该对话已改为 `acceptEdits`，可以用 `/mode` 换成别的 |
 | 误删了一个对话 | 会话还保存在磁盘上，用 `/resume` 重新打开 |
-| 流式预览不动 | 设置 `STREAM_MODE=edit`（drafts 不可用时 bot 也会自动切换） |
+| 流式预览不动 | 只有 `/thinking` 打开时才有预览（否则回答整段发出）。设置 `STREAM_MODE=edit`（drafts 不可用时 bot 也会自动切换） |
 | bot 完全没反应 | 确认你的 ID 在 `ALLOWED_USER_IDS` 里、用的是私聊，并且 `journalctl -u tg-cc-bot` 里有 `polling` |
 | 日志里有 `409: Conflict` | Telegram 规定一个 bot token 同时只有一个拉取者，而有另一个客户端同时在拉这个 bot 的消息。bot 自己无论开多少个对话和 Claude 会话，都只有一个拉取循环。常见原因：Claude Code 的 Telegram 插件配置了这个 bot 的 token（你自己运行的 `claude` 会加载它；bot 自己的会话不会），bot 的第二个副本，或者另一台机器上的副本。`sudo bash deploy/deploy.sh check` 会列出本机用这个 token 的进程和配置文件，以及它们是怎么启动的。在此期间 bot 会按间隔重试，不会崩溃 |
 | 输入 `/` 没有命令列表 | bot 启动时会设置菜单，拿到 Claude Code 的命令后再更新一次（日志里是 `menu: N commands`；`deploy.sh check` 会显示数量）。如果 Telegram 还显示旧菜单，重新打开对话 |

@@ -47,7 +47,8 @@ export interface SessionSettings {
   model?: string;
   permissionMode: PermissionMode;
   effort?: Effort;
-  verbose: boolean;
+  /** Show Claude's notes between steps and its thinking, not just its answers (/thinking). */
+  thinking: boolean;
 }
 
 export type TitleSource = "placeholder" | "auto" | "user";
