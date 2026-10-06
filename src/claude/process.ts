@@ -65,6 +65,11 @@ export interface ProcessHandle {
   setPermissionMode(mode: PermissionMode): Promise<void>;
   setEffort(effort: Effort | undefined): Promise<void>;
   setShowThinking(on: boolean): Promise<void>;
+  /**
+   * A short title for `description` from Claude Code's own session namer; with
+   * `persist`, it also becomes the session's title. Null when none was made.
+   */
+  generateTitle(description: string, opts?: { persist?: boolean }): Promise<string | null>;
   contextUsage(): Promise<ContextUsage | null>;
   /** Slash commands and skills as Claude Code sees them now (asked afresh). */
   supportedCommands(): Promise<SlashCommand[]>;
@@ -87,6 +92,8 @@ export interface SdkProcessOptions {
   initTimeoutMs?: number;
   log?: Logger;
 }
+
+type TitleGenerator = (description: string, opts?: { persist?: boolean }) => Promise<string | null>;
 
 /** Bot settings that must never reach Claude Code, nor the tools and MCP servers it runs. */
 const BOT_ONLY_ENV = ["TELEGRAM_BOT_TOKEN"];
@@ -279,6 +286,19 @@ export class SdkProcess implements ProcessHandle {
 
   get backgroundTasks(): number {
     return this.tasks.length;
+  }
+
+  async generateTitle(description: string, opts: { persist?: boolean } = {}): Promise<string | null> {
+    // generate_session_title is a supported control request, but Query.generateSessionTitle()
+    // is missing from the SDK's typings (0.3.286): use it when present, never rely on it.
+    const q = this.q as (Query & { generateSessionTitle?: TitleGenerator }) | null;
+    if (!q?.generateSessionTitle) return null;
+    try {
+      return (await q.generateSessionTitle(description, { persist: opts.persist }))?.trim() || null;
+    } catch (err) {
+      this.log.warn("session title not generated:", err);
+      return null;
+    }
   }
 
   async contextUsage(): Promise<ContextUsage | null> {

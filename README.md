@@ -54,7 +54,7 @@ To work in another directory, switch the project first (`/project use api`, in a
 - **Thinking on demand.** `/thinking` shows Claude's notes between steps, its thinking summaries and timings in that chat, with a live preview of the text as it is written (`STREAM_MODE`). Tool calls are never shown.
 - **Interactive prompts as buttons.** Permission requests (Allow / Always allow / Deny), `AskUserQuestion` (single- and multi-select), and plan approval, in the chat that asked. While a prompt is open, replying with text denies the request and tells Claude what to do instead, or answers the question in your own words.
 - **Claude Code's full command set.** Built-ins, bundled skills, your personal and project skills, plugin commands and `.claude/commands` work in every chat and appear in the Telegram command menu.
-- **Chat titles.** A chat without a name of yours is titled after its first prompt; names you give are never overwritten. `/rename` renames both the chat and the session.
+- **Chat titles by Claude.** A chat without a name of yours gets a short title that Claude writes from the conversation, the same one Claude Code shows (the desktop app, `/resume`). It is set within seconds of your first message, or when the first answer is done, and never changed after that. Names you give are never overwritten. `/rename <title>` renames both the chat and the session; `/rename` alone lets Claude name it, e.g. for an older chat with a long name.
 - **Photos and files.** Photos are sent to Claude as images. Documents are saved under `<project>/.tg-uploads/` and the path is passed to Claude.
 - **Status.** Notices for context compaction, API retries and usage-limit warnings (permission denials too, with `/thinking`). `/status` shows this chat's session (with context usage) and the bot's process pool.
 
@@ -69,7 +69,7 @@ All bot commands work in every chat and don't involve Claude.
 | `/stop` | Interrupt the running turn, cancel open prompts and a message still waiting for a slot |
 | `/model [name]` · `/mode [mode]` · `/effort [level]` | Show (buttons) or change this chat's model, permission mode or effort; also before the first message |
 | `/thinking` | Show Claude's notes, thinking summaries and timings in this chat, or only its answers (the default). `/verbose` still works |
-| `/rename <title>` | Rename this chat and its session |
+| `/rename [title]` | Rename this chat and its session; without a title, Claude names it from the conversation |
 | `/fork` (`/branch`) | Copy this session into a new chat |
 | `/close` | Stop this chat's process now; your next message resumes it |
 | `/delete` | Delete the chat and its messages after confirmation (the session stays resumable) |

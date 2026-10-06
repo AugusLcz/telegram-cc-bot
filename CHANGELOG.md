@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-06
+
+### Added
+
+- `/rename` without a title: Claude names the chat from its conversation, as Claude Code's `/rename` does.
+  Useful for older chats named after a long first sentence.
+
+### Changed
+
+- Chats are named by Claude, like Claude Code and the desktop app name their sessions. The title is short
+  (2–5 words, in the conversation's language) and written from the conversation instead of copied from the
+  first line. It is Claude Code's own title for the session, or one Claude generates from the first
+  exchange when Claude Code made none, e.g. when the chat started with a skill.
+
+### Fixed
+
+- A chat whose first message was a skill or command (`/deep-research …`), or a photo or file without a
+  caption, was renamed by the next plain question, even days later. A chat is now named once, after its
+  first message, and never renamed by the bot after that.
+
 ## [0.4.0] - 2026-10-06
 
 ### Added
@@ -191,7 +211,8 @@ First release.
   real Bot API spike script (`scripts/topics-spike.ts`).
 - Architecture document, English and Chinese READMEs, 66 tests.
 
-[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/AugusLcz/telegram-cc-bot/compare/v0.2.1...v0.2.2

@@ -29,6 +29,9 @@ export class FakeProcess implements ProcessHandle {
   permissionMode: PermissionMode;
   effort: Effort | undefined;
   showThinking: boolean;
+  /** What generateTitle answers; the descriptions it was asked for are kept. */
+  title: string | null = null;
+  titleRequests: { description: string; persist: boolean }[] = [];
   interrupts = 0;
   readonly spec: ProcessSpec;
   readonly hooks: ProcessHooks;
@@ -79,6 +82,10 @@ export class FakeProcess implements ProcessHandle {
   async setShowThinking(on: boolean): Promise<void> {
     this.showThinking = on;
     this.controls.push(`thinking:${on ? "on" : "off"}`);
+  }
+  async generateTitle(description: string, opts: { persist?: boolean } = {}): Promise<string | null> {
+    this.titleRequests.push({ description, persist: opts.persist === true });
+    return this.title;
   }
   async contextUsage(): Promise<ContextUsage | null> {
     return { percentage: 12, totalTokens: 24000, maxTokens: 200000 } as ContextUsage;

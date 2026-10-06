@@ -8,6 +8,9 @@ item when it ships, add one when you find a gap.
 
 - The `/skills` browser and the 0.3.0 commands on a real phone after `deploy.sh update`: tabs, paging,
   copy button, `/mcp` buttons, `/tasks` stop, `/diff` patch file, `/plugin install`.
+- Chat names by Claude on the server: a new chat gets a short title within seconds (`chat … named "…"
+  (Claude Code)` in the log), a skill as the first message gets a generated one, and `/rename` alone works
+  ([0013](decisions/0013-chats-are-named-by-claude.md)).
 - Answers-only chats on a phone: the working message (elapsed time, Stop, hidden during a prompt, gone
   before the answer, which notifies), and with `/thinking` whether thinking summaries actually arrive for
   the account's model ([0012](decisions/0012-chats-show-answers-not-work.md)).
@@ -44,4 +47,6 @@ item when it ships, add one when you find a gap.
 
 - Private-chat topics are new in the Bot API (9.3, December 2025); `scripts/topics-spike.ts` checks the
   real behaviour.
+- `Query.generateSessionTitle()` (the fallback for naming chats) works but is missing from the SDK's
+  typings; after an SDK upgrade, check that chats starting with a skill still get a title.
 - Agent SDK billing for subscription users may change (a separate SDK credit was announced, then paused).

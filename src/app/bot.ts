@@ -42,6 +42,8 @@ export interface CreateAppOptions {
   exec?: Exec;
   /** Timing of the working message; defaults suit Telegram. */
   working?: WorkingTiming;
+  /** Timing of chat naming (ThreadServiceDeps.titleTiming). */
+  titleTiming?: { checkMs?: number; retryMs?: number };
 }
 
 /** Build every service, wire the pool to Telegram and install the update handlers on `bot`. */
@@ -117,6 +119,7 @@ export function createApp(opts: CreateAppOptions): App {
     topics: new TelegramTopics(api),
     sessions: opts.sessions,
     titleFromPrompt,
+    titleTiming: opts.titleTiming,
     log: log.child("threads"),
   });
 

@@ -108,9 +108,20 @@ The full list with usage is in the [README](../README.md#commands). What matters
 - **`/fork`** forks the transcript (`forkSession`) and opens it in a new chat.
 - There is no `/new`: going back to the main screen and typing is the new-chat gesture.
 
-**Titles.** A chat whose name Telegram marks as implicit is renamed after its first prompt (first
-line, at most 40 characters). Names the user typed, or later renames by the user
-(`forum_topic_edited`), are never overwritten by the bot.
+**Titles.** A chat whose name Telegram marks as implicit (`titleSource: "placeholder"`) is named once, by
+Claude, like Claude Code names its sessions ([0013](decisions/0013-chats-are-named-by-claude.md)):
+
+1. Claude Code's own title for the session (`getSessionInfo().customTitle`). Claude Code writes it in the
+   background from the first message (2–5 words, in the conversation's language). The bot looks for it
+   6 s after the first message and again when the first answer is done.
+2. Otherwise (the first message was a skill or command, a photo, or too short), a title Claude generates
+   from the first message and answer (`ProcessHandle.generateTitle`, persisted to the session).
+3. Otherwise the prompt's first line (at most 40 characters).
+
+`ThreadService.nameChat` then sets `titleSource: "auto"`, so no later message renames the chat. A chat
+whose session started while this process wasn't waiting for its name (an older version, a restart) keeps
+its name. Names the user typed, or renames by the user (`forum_topic_edited`, `/rename`), are never
+overwritten; `/rename` without a title asks Claude for one from the transcript (`renameByClaude`).
 
 **Outside chats.** Without Threaded Mode every message arrives without a `message_thread_id`. The bot
 then answers with how to enable Threaded Mode and starts no session. Bot commands still work.

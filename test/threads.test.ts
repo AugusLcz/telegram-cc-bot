@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { SessionPool } from "../src/claude/pool.ts";
-import type { SessionApi, SessionInfo } from "../src/claude/sessions.ts";
+import type { SessionApi, SessionInfo, TranscriptEntry } from "../src/claude/sessions.ts";
 import type { Target } from "../src/core/types.ts";
 import { ChatService, claimStateForBot } from "../src/domain/chats.ts";
 import { UserError } from "../src/domain/errors.ts";
@@ -12,7 +12,7 @@ import { ProjectService } from "../src/domain/projects.ts";
 import { ThreadService, type TopicGateway } from "../src/domain/threads.ts";
 import { MemoryStore } from "../src/store/store.ts";
 import { titleFromPrompt } from "../src/telegram/topics.ts";
-import { FakeFactory } from "./helpers/fake-process.ts";
+import { FakeFactory, tick, waitFor, type FakeProcess } from "./helpers/fake-process.ts";
 
 class FakeTopics implements TopicGateway {
   next = 900; // far from the chat IDs the tests bind by hand
@@ -35,6 +35,7 @@ class FakeTopics implements TopicGateway {
 class FakeSessions implements SessionApi {
   infos = new Map<string, SessionInfo>();
   renamed: [string, string][] = [];
+  entries: TranscriptEntry[] = [];
   forks = 0;
   async list() {
     return [...this.infos.values()];
@@ -52,13 +53,13 @@ class FakeSessions implements SessionApi {
     return {};
   }
   async transcript() {
-    return [];
+    return this.entries;
   }
 }
 
 const CHAT = 42;
 
-function setup() {
+function setup(titleTiming = { checkMs: 60_000, retryMs: 0 }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tgcc-proj-"));
   const web = path.join(root, "web");
   const api = path.join(root, "api");
@@ -85,6 +86,7 @@ function setup() {
     topics,
     sessions,
     titleFromPrompt,
+    titleTiming,
     newSessionId: () => `sess-${++n}`,
   });
   return { root, web, api, store, chats, projects, factory, pool, topics, sessions, threads };
@@ -143,23 +145,119 @@ test("first send creates the session, later sends resume it with persisted setti
   assert.equal(p2.spec.effort, "high");
 });
 
-test("auto-title on the first prompt; user titles are never overwritten", async () => {
+/** A chat's first turn as Claude Code reports it: init (the session starts), then the answer. */
+async function firstTurn(p: FakeProcess, answer = "done"): Promise<void> {
+  await p.emit({ type: "system", subtype: "init", session_id: p.sessionId });
+  await p.finishTurn(answer);
+}
+
+test("a chat is named once, with Claude Code's own title for its session", async () => {
   const { threads, topics, sessions, factory } = setup();
+  const question = "我想了解一下 AIS 这只 ETF 在 10 月 2 日为什么成交量突然放大，这对后市意味着什么？";
+  const tab = threads.bindTab(CHAT, 100, question.slice(0, 30), true);
+  await threads.send(tab.key, question, question);
+  assert.equal(topics.renamed.length, 0, "not renamed before Claude has a title");
+  sessions.infos.set("sess-1", { sessionId: "sess-1", summary: "AIS ETF 成交量异常", customTitle: "AIS ETF 成交量异常", lastModified: 1 });
+  await firstTurn(factory.last());
+  await waitFor(() => topics.renamed.length === 1, 1000, "named");
+  assert.equal(topics.renamed[0].name, "AIS ETF 成交量异常");
+  assert.equal(threads.get(tab.key)!.titleSource, "auto");
+  assert.deepEqual(factory.last().titleRequests, [], "nothing generated when Claude Code has a title");
+
+  await threads.send(tab.key, "days later: and now?", "days later: and now?");
+  await firstTurn(factory.last());
+  await tick(20);
+  assert.equal(topics.renamed.length, 1, "never renamed again");
+});
+
+test("Claude Code's title is taken as soon as it exists, before the first answer is done", async () => {
+  const { threads, topics, sessions, factory } = setup({ checkMs: 20, retryMs: 0 });
   const tab = threads.bindTab(CHAT, 100);
-  await threads.send(tab.key, "Fix the flaky login test\nmore details", "Fix the flaky login test\nmore details");
-  assert.equal(threads.get(tab.key)!.title, "Fix the flaky login test");
-  assert.deepEqual(topics.renamed.map((r) => r.name), ["Fix the flaky login test"]);
-  await factory.last().finishTurn();
-  await threads.send(tab.key, "second prompt", "second prompt");
-  assert.equal(topics.renamed.length, 1, "only the first prompt titles the tab");
+  await threads.send(tab.key, "the login test fails at random", "the login test fails at random");
+  await factory.last().emit({ type: "system", subtype: "init", session_id: "sess-1" });
+  sessions.infos.set("sess-1", { sessionId: "sess-1", summary: "Login test flake", customTitle: "Login test flake", lastModified: 1 });
+  await waitFor(() => topics.renamed.length === 1, 1000, "named early");
+  assert.equal(topics.renamed[0].name, "Login test flake");
+  assert.equal(factory.last().turnActive, true, "the first answer is still being written");
+});
 
-  const named = threads.bindTab(CHAT, 101, "Mine");
-  await threads.send(named.key, "something", "something");
-  assert.equal(threads.get(named.key)!.title, "Mine");
+test("without Claude Code's title (a skill first), Claude names the chat from the first exchange", async () => {
+  const { threads, topics, factory } = setup();
+  factory.onCreate = (p) => {
+    p.title = "Parser quote handling";
+  };
+  const tab = threads.bindTab(CHAT, 100);
+  await threads.send(tab.key, "/code-review src/parser.ts", "/code-review src/parser.ts");
+  await firstTurn(factory.last(), "Nested quotes break the parser; fixed in parse().");
+  await waitFor(() => topics.renamed.length === 1, 1000, "named");
+  assert.equal(topics.renamed[0].name, "Parser quote handling");
+  const [request] = factory.last().titleRequests;
+  assert.equal(request.persist, true, "the session gets the same title (/resume, desktop)");
+  assert.match(request.description, /code-review src\/parser\.ts[\s\S]*Nested quotes/);
+});
 
-  await threads.topicRenamed(tab.key, "Renamed in Telegram");
+test("with no title from Claude the first line is the last resort; a name the user gives meanwhile wins", async () => {
+  const { threads, topics, factory } = setup();
+  const a = threads.bindTab(CHAT, 100);
+  await threads.send(a.key, "Fix the flaky login test\nmore details", "Fix the flaky login test\nmore details");
+  await firstTurn(factory.last());
+  await waitFor(() => topics.renamed.length === 1, 1000, "named");
+  assert.equal(topics.renamed[0].name, "Fix the flaky login test");
+
+  const b = threads.bindTab(CHAT, 101);
+  await threads.send(b.key, "something", "something");
+  await threads.topicRenamed(b.key, "Mine");
+  await firstTurn(factory.last());
+  await tick(20);
+  assert.equal(threads.get(b.key)!.title, "Mine");
+  assert.equal(topics.renamed.length, 1);
+});
+
+test("a chat that starts with a photo is named after its first answer, then never again; old chats keep their names", async () => {
+  const { threads, topics, factory, store } = setup();
+  factory.onCreate = (p) => {
+    p.title = "Cup and handle chart";
+  };
+  const photo = threads.bindTab(CHAT, 100, "Photo", true);
+  await threads.send(photo.key, [{ type: "text", text: "Please take a look at this image." }]);
+  await firstTurn(factory.last(), "This is a cup-and-handle pattern.");
+  await waitFor(() => topics.renamed.length === 1, 1000, "named");
+  assert.equal(topics.renamed[0].name, "Cup and handle chart");
+  await threads.send(photo.key, "what about this, days later?", "what about this, days later?");
+  await firstTurn(factory.last());
+  await tick(20);
+  assert.equal(topics.renamed.length, 1, "a later question does not rename it");
+
+  // A chat from an older version: its session started while the name was still a placeholder.
+  const old = threads.bindTab(CHAT, 101);
+  store.update(() => {
+    threads.get(old.key)!.started = true;
+  });
+  await threads.send(old.key, "a new question", "a new question");
+  await firstTurn(factory.last());
+  await tick(20);
+  assert.equal(topics.renamed.length, 1);
+  assert.equal(threads.get(old.key)!.titleSource, "auto");
+});
+
+test("/rename without a title: Claude names the chat from its conversation", async () => {
+  const { threads, topics, sessions, factory } = setup();
+  factory.onCreate = (p) => {
+    p.title = "Login cookie race";
+  };
+  const tab = threads.bindTab(CHAT, 100, "A very long name I typed once", false);
+  await assert.rejects(threads.renameByClaude(tab.key), UserError, "nothing to name before the session starts");
+  await threads.send(tab.key, "the login test fails at random", "the login test fails at random");
+  await firstTurn(factory.last(), "A race in the session cookie.");
+  sessions.entries = [
+    { role: "user", text: "the login test fails at random", tools: [] },
+    { role: "assistant", text: "A race in the session cookie.", tools: [] },
+  ];
+  assert.equal(await threads.renameByClaude(tab.key), "Login cookie race");
+  assert.equal(topics.renamed.at(-1)!.name, "Login cookie race");
+  assert.deepEqual(sessions.renamed, [["sess-1", "Login cookie race"]]);
   assert.equal(threads.get(tab.key)!.titleSource, "user");
-  assert.equal(sessions.renamed.length, 0, "unstarted sessions are not renamed on disk");
+  assert.match(factory.last().titleRequests.at(-1)!.description, /fails at random[\s\S]*session cookie/);
 });
 
 test("resumeIntoTab opens a new tab once and reuses it afterwards", async () => {

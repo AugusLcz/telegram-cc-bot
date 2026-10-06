@@ -162,6 +162,11 @@ export class SessionPool {
     await this.get(key)?.setShowThinking(on);
   }
 
+  /** A title from the key's live process (null without one). */
+  async generateTitle(key: string, description: string, opts?: { persist?: boolean }): Promise<string | null> {
+    return (await this.get(key)?.generateTitle(description, opts)) ?? null;
+  }
+
   async contextUsage(key: string): Promise<ContextUsage | null> {
     return (await this.get(key)?.contextUsage()) ?? null;
   }

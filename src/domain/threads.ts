@@ -35,8 +35,14 @@ export interface ThreadServiceDeps {
   pool: SessionPool;
   topics: TopicGateway;
   sessions: SessionApi;
-  /** Short tab title from a prompt. */
+  /** Short tab title from a prompt (the last resort for naming a chat). */
   titleFromPrompt: (text: string) => string;
+  /**
+   * Naming a chat: look for Claude Code's title `checkMs` after the first message
+   * (default 6 s), and wait `retryMs` (3 s) for it once more when the first answer
+   * comes sooner, before asking for one.
+   */
+  titleTiming?: { checkMs?: number; retryMs?: number };
   log?: Logger;
   newSessionId?: () => string;
 }
@@ -53,6 +59,11 @@ export interface SendOutcome {
 
 export const PLACEHOLDER_TITLE = "New session";
 
+/** How much conversation text a title is generated from (Claude Code caps its own input similarly). */
+const TITLE_INPUT_MAX = 4000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 function isMissingTranscript(err: unknown): boolean {
   return err instanceof Error && /no conversation found|session.*not found|ENOENT/i.test(err.message);
 }
@@ -68,6 +79,9 @@ export class ThreadService {
   private readonly d: ThreadServiceDeps;
   private readonly log: Logger;
   private readonly mutex = new KeyedMutex();
+  private readonly naming = new KeyedMutex();
+  /** First message of each chat still waiting for its name (this process only). */
+  private readonly firstPrompts = new Map<ThreadKey, string>();
   private readonly newSessionId: () => string;
 
   constructor(deps: ThreadServiceDeps) {
@@ -226,7 +240,7 @@ export class ThreadService {
   send(key: ThreadKey, content: UserContent, promptText?: string): Promise<SendOutcome> {
     return this.mutex.run(key, async () => {
       const record = this.require(key);
-      if (promptText && record.titleSource === "placeholder") await this.autoTitle(key, record, promptText);
+      if (record.titleSource === "placeholder") this.awaitName(key, record, promptText);
       this.touch(record);
       try {
         await this.d.pool.send(key, () => this.specFor(key), content);
@@ -267,6 +281,9 @@ export class ThreadService {
       });
     } else if (msg.type === "result") {
       this.touch(record);
+      if (record.titleSource === "placeholder" && this.firstPrompts.has(key)) {
+        void this.nameChat(key, { generate: true, answer: msg.subtype === "success" ? msg.result : undefined });
+      }
     }
   }
 
@@ -301,6 +318,22 @@ export class ThreadService {
     });
     await this.d.topics.rename(parseThreadKey(key), title);
     await this.renameSession(record, title);
+  }
+
+  /**
+   * /rename without a title: Claude names the chat from its conversation, as
+   * Claude Code's /rename does. Starts the chat's process if it is hibernated.
+   */
+  async renameByClaude(key: ThreadKey): Promise<string> {
+    const record = this.require(key);
+    const entries = record.started ? await this.d.sessions.transcript(record.sessionId, record.cwd) : [];
+    const text = entries.map((e) => e.text).filter(Boolean).join("\n\n").trim();
+    if (!text) throw new UserError("Nothing to name yet: send a message first.");
+    await this.d.pool.ensure(key, () => this.specFor(key));
+    const title = await this.d.pool.generateTitle(key, text.slice(-TITLE_INPUT_MAX));
+    if (!title) throw new UserError("Claude couldn't name this chat right now. Use /rename &lt;title&gt;.");
+    await this.rename(key, title);
+    return title;
   }
 
   /** The user renamed the tab in Telegram: remember it and never auto-rename again. */
@@ -429,18 +462,77 @@ export class ThreadService {
     });
   }
 
-  private async autoTitle(key: ThreadKey, record: ThreadRecord, promptText: string): Promise<void> {
-    const title = this.d.titleFromPrompt(promptText);
-    if (!title) return;
-    this.d.store.update(() => {
-      record.title = title;
-      record.titleSource = "auto";
-    });
-    try {
-      await this.d.topics.rename(parseThreadKey(key), title);
-    } catch (err) {
-      this.log.debug(`auto-title of ${key} failed:`, err);
+  /**
+   * The chat's first message reached Claude: name the chat once Claude has a
+   * title for it (nameChat). A chat whose session started before this process
+   * was waiting for it (an older version, a restart) keeps its name.
+   */
+  private awaitName(key: ThreadKey, record: ThreadRecord, promptText: string | undefined): void {
+    if (this.firstPrompts.has(key)) return;
+    if (record.started) {
+      this.d.store.update(() => {
+        record.titleSource = "auto";
+      });
+      return;
     }
+    this.firstPrompts.set(key, promptText ?? "");
+    setTimeout(() => void this.nameChat(key, { generate: false }), this.d.titleTiming?.checkMs ?? 6000).unref();
+  }
+
+  /**
+   * Name a chat after its first exchange, once, the way Claude Code names its
+   * sessions: Claude Code's own title for the session (it makes one from the
+   * first message, in the background), else a title generated from the first
+   * message and answer, else the prompt's first line. Without `generate` (the
+   * early look), only Claude Code's title is taken. Never renames a chat the
+   * user named meanwhile.
+   */
+  private nameChat(key: ThreadKey, opts: { generate: boolean; answer?: string }): Promise<void> {
+    return this.naming.run(key, async () => {
+      const waiting = () => {
+        const r = this.get(key);
+        return r?.titleSource === "placeholder" && this.firstPrompts.has(key) ? r : undefined;
+      };
+      const record = waiting();
+      if (!record) {
+        this.firstPrompts.delete(key);
+        return;
+      }
+      const prompt = this.firstPrompts.get(key) ?? "";
+      let source = "Claude Code";
+      let title = await this.claudeCodeTitle(record);
+      if (!title && opts.generate) {
+        await sleep(this.d.titleTiming?.retryMs ?? 3000);
+        title = await this.claudeCodeTitle(record);
+        const exchange = [prompt, opts.answer ?? ""].filter((s) => s.trim()).join("\n\n");
+        if (!title && exchange) {
+          source = "generated";
+          title = (await this.d.pool.generateTitle(key, exchange.slice(0, TITLE_INPUT_MAX), { persist: true })) ?? undefined;
+        }
+        if (!title && prompt) {
+          source = "first line";
+          title = this.d.titleFromPrompt(prompt) || undefined;
+        }
+      }
+      if (!title && !opts.generate) return; // look again when the first answer is done
+      const current = waiting();
+      this.firstPrompts.delete(key);
+      if (!current) return;
+      this.d.store.update(() => {
+        if (title) current.title = title;
+        current.titleSource = "auto";
+      });
+      if (!title) return;
+      this.log.info(`chat ${key} named "${title}" (${source})`);
+      await this.d.topics.rename(parseThreadKey(key), title).catch((err) => this.log.debug(`naming ${key} failed:`, err));
+    });
+  }
+
+  /** The session's title as Claude Code keeps it (a /rename there, else its AI title). */
+  private async claudeCodeTitle(record: ThreadRecord): Promise<string | undefined> {
+    if (!record.started) return undefined;
+    const info = await this.d.sessions.info(record.sessionId).catch(() => undefined);
+    return info?.customTitle?.replace(/\s+/g, " ").trim() || undefined;
   }
 
   private async renameSession(record: ThreadRecord, title: string): Promise<void> {

@@ -58,8 +58,9 @@ test("each new chat is its own session in the active project", async () => {
   await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("reply: Fix the build")), 1000, "reply in chat 500");
   const first = h.texts(h.inThread(500));
   assert.match(first[0], /<b>home<\/b>.* · new session/, "session start line comes before the reply");
+  await waitFor(() => h.calls.some((c) => c.method === "editForumTopic"), 1000, "named");
   const rename = h.calls.find((c) => c.method === "editForumTopic")!;
-  assert.equal(rename.payload.name, "Fix the build", "chat titled from its first prompt");
+  assert.equal(rename.payload.name, "Fix the build", "with no title from Claude, the prompt's first line");
 
   await h.send("Another task", { thread: 501 });
   await waitFor(() => h.texts(h.inThread(501)).some((t) => t.includes("reply: Another task")), 1000, "reply in chat 501");
@@ -106,6 +107,31 @@ test("/project use moves a chat that has not started; a started chat keeps its d
   await h.send("next", { thread: 701 });
   await waitFor(() => h.factory.created.length === 2, 1000, "second process");
   assert.equal(h.factory.last().spec.cwd, h.home);
+});
+
+test("a skill as a chat's first message: Claude names the chat; a question days later doesn't rename it", async () => {
+  const h = harness();
+  h.factory.onCreate = (p) => {
+    p.title = "Parser review";
+  };
+  await h.send("/code_review the parser", { thread: 500 });
+  await waitFor(() => h.calls.some((c) => c.method === "editForumTopic"), 1000, "titled");
+  await waitFor(() => h.app.pool.state(`${OWNER}:500`) === "idle", 1000, "turn done");
+  await h.send("and what happened on Oct 2?", { thread: 500 });
+  await waitFor(() => h.texts(h.inThread(500)).some((t) => t.includes("Oct 2")), 1000, "second reply");
+  const names = h.calls.filter((c) => c.method === "editForumTopic").map((c) => c.payload.name);
+  assert.deepEqual(names, ["Parser review"]);
+});
+
+test("/rename without a title lets Claude name the chat", async () => {
+  const h = harness();
+  await h.send("draft the release notes", { thread: 500 });
+  await waitFor(() => h.calls.some((c) => c.method === "editForumTopic"), 1000, "named after the first line");
+  h.factory.last().title = "Release notes";
+  h.app.sessions.transcript = async () => [{ role: "user", text: "draft the release notes", tools: [] }];
+  await h.send("/rename", { thread: 500 });
+  assert.match(h.texts(h.inThread(500)).at(-1)!, /Claude named this chat <b>Release notes<\/b>/);
+  assert.equal(h.app.threads.get(`${OWNER}:500`)!.title, "Release notes");
 });
 
 test("a chat the user named keeps its name; an unnamed one is titled from the first prompt", async () => {

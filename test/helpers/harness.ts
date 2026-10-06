@@ -28,6 +28,8 @@ export interface HarnessOptions {
   exec?: Exec;
   /** Working message timing; by default it never shows within a test. */
   working?: WorkingTiming;
+  /** Chat naming timing; by default no early look and no wait before generating. */
+  titleTiming?: { checkMs?: number; retryMs?: number };
 }
 
 /** A bot wired to fake Telegram, fake Claude Code processes and an in-memory store. */
@@ -100,6 +102,7 @@ export function harness(opts: HarnessOptions = {}) {
     log: silentLogger,
     exec: opts.exec,
     working: opts.working ?? { delayMs: 60_000 },
+    titleTiming: opts.titleTiming ?? { checkMs: 60_000, retryMs: 0 },
   });
   app.catalog.update({
     commands: [

@@ -95,16 +95,17 @@ export async function handleThreadInput(app: App, ctx: Context, key: ThreadKey):
     const record = ensureRecord(app, key);
     const { data } = await downloadFile(app.api, app.cfg.botToken, doc.file_id, doc.file_size);
     const saved = await saveUpload(record.cwd, doc.file_name ?? "file", data);
-    startTurn(app, key, `I uploaded a file: ${saved}${msg.caption ? `\n\n${msg.caption}` : ""}`, msg.caption);
+    startTurn(app, key, `I uploaded a file: ${saved}${msg.caption ? `\n\n${msg.caption}` : ""}`, msg.caption ?? doc.file_name);
     return;
   }
   await reply(app, ctx, "Unsupported message type here. Send text, a photo or a file.");
 }
 
-/** A /command that is not a bot command: hand it to Claude Code. */
+/** A /command that is not a bot command: hand it to Claude Code (as a chat's first message, it names the chat). */
 export function passThrough(app: App, key: ThreadKey, name: string, args: string): void {
   const claudeName = app.catalog.resolve(name) ?? name;
-  startTurn(app, key, `/${claudeName}${args ? ` ${args}` : ""}`);
+  const text = `/${claudeName}${args ? ` ${args}` : ""}`;
+  startTurn(app, key, text, text);
 }
 
 // ---- commands ------------------------------------------------------------------
@@ -189,8 +190,12 @@ const thinking: ChatRun = async (app, { ctx }, key) => {
 
 const rename: ChatRun = async (app, { ctx, args }, key) => {
   const title = args.trim();
-  if (!title) throw new UserError("Usage: /rename &lt;title&gt;");
   ensureRecord(app, key);
+  if (!title) {
+    const named = await app.threads.renameByClaude(key);
+    await reply(app, ctx, `✏️ Claude named this chat <b>${escapeHtml(named)}</b>`);
+    return;
+  }
   await app.threads.rename(key, title);
   await reply(app, ctx, `✏️ Renamed to <b>${escapeHtml(title)}</b>`);
 };
@@ -245,7 +250,9 @@ export function registerThread(app: App): void {
     .register(
       chatCommand({ name: "thinking", aliases: ["verbose"], description: "Show Claude's notes and thinking in this chat", run: thinking }),
     )
-    .register(chatCommand({ name: "rename", usage: "<title>", description: "Rename this chat and its session", run: rename }))
+    .register(
+      chatCommand({ name: "rename", usage: "[title]", description: "Rename this chat (no title: Claude names it)", run: rename }),
+    )
     .register(chatCommand({ name: "fork", aliases: ["branch"], description: "Copy this session into a new chat", run: fork }))
     .register(chatCommand({ name: "close", description: "Hibernate now (resumes on next message)", run: close }))
     .register(chatCommand({ name: "delete", description: "Delete this chat (session stays resumable)", run: del }));

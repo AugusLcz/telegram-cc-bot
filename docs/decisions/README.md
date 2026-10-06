@@ -18,6 +18,7 @@ that supersedes it instead of editing history.
 | [0010](0010-commands-in-the-menu-skills-in-a-browser.md) | Claude Code commands are classified; the `/` menu lists commands only; `/skills` is a browser | 0.3.0 |
 | [0011](0011-deploy-script-design.md) | `deploy.sh`: prerequisites first, stop the bot first, settings from three sources, no Telegram probing | 0.2.0 |
 | [0012](0012-chats-show-answers-not-work.md) | Chats show answers only; tool calls never; `/thinking` shows notes and thinking; a working message with Stop | 0.4.0 |
+| [0013](0013-chats-are-named-by-claude.md) | Chats are named once, by Claude, with Claude Code's own session title | 0.5.0 |
 
 Template for a new record (`NNNN-short-title.md`):
 
